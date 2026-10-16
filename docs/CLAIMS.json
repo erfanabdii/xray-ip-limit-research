@@ -1,0 +1,318 @@
+{
+  "schema_version": 1,
+  "prepared_date": "2026-10-16",
+  "scope": "Selected English publication candidate; historical evidence is not a new production test.",
+  "claim_ids": "Preserved from the internal stage-1 inventory; private source paths are omitted.",
+  "claims": [
+    {
+      "id": "F01",
+      "claim": "Attributing the client IP in Xray does not make the origin firewall see that IP as the packet source.",
+      "evidence_status": "source_review",
+      "package_evidence": [
+        "docs/FINDINGS.md",
+        "docs/SOURCES.md"
+      ],
+      "limit": "Topology/source explanation; live CDN/firewall path was not replayed in these loopback benchmarks."
+    },
+    {
+      "id": "F02",
+      "claim": "The native gate and online stats share the authenticated account/source-IP session and OnlineMap.",
+      "evidence_status": "prototype_tested",
+      "package_evidence": [
+        "patches/xray-native.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Additional prototype changes, not a feature of the unmodified pinned base."
+    },
+    {
+      "id": "F03",
+      "claim": "IP Log Refresh and Clear are history/display operations, not native-slot or stream controls.",
+      "evidence_status": "source_review",
+      "package_evidence": [
+        "docs/SOURCES.md",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "No real account UI control was exercised to establish new native integration."
+    },
+    {
+      "id": "F04",
+      "claim": "The approximately ten-second node sync and the 120-second classification freshness window are different mechanisms.",
+      "evidence_status": "diagnostic_fixture",
+      "package_evidence": [
+        "patches/panel-integration.patch",
+        "docs/FINDINGS.md",
+        "docs/SOURCES.md"
+      ],
+      "limit": "The database fixture stipulates an old timestamp; it does not prove a particular real remote flow was misclassified."
+    },
+    {
+      "id": "F05",
+      "claim": "The native prototype atomically reserves per-account IP references and releases the last reference on context completion.",
+      "evidence_status": "prototype_tested",
+      "package_evidence": [
+        "patches/xray-native.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Bounded unit/race/churn evidence is not a multi-day leak guarantee or full transport coverage."
+    },
+    {
+      "id": "F06",
+      "claim": "The one-core native functional fixture rejected 48 third-IP admissions across three 16-account runs.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/functional.json",
+        "docs/BENCHMARKS.md"
+      ],
+      "limit": "Synthetic VLESS/XHTTP loopback fixture; no native multi-node cap."
+    },
+    {
+      "id": "F07",
+      "claim": "Matched-build pass-2 candidate-on lifetime CPU was about 3.16 percent above stock.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/cpu-samples.json",
+        "scripts/summarize.py",
+        "docs/BENCHMARKS.md"
+      ],
+      "limit": "One-account workload, three samples; earlier unmatched-build comparisons were excluded."
+    },
+    {
+      "id": "F08",
+      "claim": "Pass-3 allowed-phase native CPU was about 16.96 percent above stock and 7.27 percent above candidate-off.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/cpu-samples.json",
+        "scripts/summarize.py",
+        "docs/BENCHMARKS.md"
+      ],
+      "limit": "Phase CPU differs from lifetime CPU; candidate-off also differed from stock and throttling limits attribution."
+    },
+    {
+      "id": "F09",
+      "claim": "Pass-5 Lua plus controller used about 54.47 percent more matched-phase CPU time than native.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/cpu-samples.json",
+        "scripts/summarize.py",
+        "docs/BENCHMARKS.md"
+      ],
+      "limit": "Server plus controller; equal allowed work; three samples per mode under quota; excludes startup/refusals/cleanup."
+    },
+    {
+      "id": "F10",
+      "claim": "Fixture release delay followed the client/server half-close timer interventions.",
+      "evidence_status": "recorded_intervention",
+      "package_evidence": [
+        "measurements/release-timing.json",
+        "docs/FINDINGS.md",
+        "docs/SOURCES.md"
+      ],
+      "limit": "Local Windows fixture, not silent mobile loss; both-zero was below observer resolution and zero lost a delayed half-close response."
+    },
+    {
+      "id": "F11",
+      "claim": "Separate pooled Lua VMs do not share global account/IP state and the inspected routing context exposes no final-close hook.",
+      "evidence_status": "diagnostic_fixture",
+      "package_evidence": [
+        "patches/xray-lua-research.patch",
+        "docs/SOURCES.md"
+      ],
+      "limit": "A passing diagnostic demonstrates a failure of naive shared counting, not a working pure-Lua limiter."
+    },
+    {
+      "id": "F12",
+      "claim": "A routing script takes over ordinary rule selection; nil/error is not a promise to resume normal rules.",
+      "evidence_status": "source_review",
+      "package_evidence": [
+        "docs/SOURCES.md",
+        "patches/xray-lua-research.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "The fixture used explicit block returns and a first-outbound blackhole; real routing equivalence remains untested."
+    },
+    {
+      "id": "F13",
+      "claim": "Official Lua DNS bindings and an external loopback controller formed a working decision-message prototype.",
+      "evidence_status": "prototype_tested",
+      "package_evidence": [
+        "patches/xray-lua-research.patch",
+        "examples/controller-routing.lua",
+        "examples/controller.example.json",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Experiment transport, not an official limiter API. Example fragments are not a turnkey reproduction of the private lab."
+    },
+    {
+      "id": "F14",
+      "claim": "The revised Lua prototype passed 15 functional checks with two co-located cores.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/functional.json",
+        "patches/xray-lua-research.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "No WAN/mTLS/physical-link partition test; stats pause was internal fault injection; controller process stop/restart was real."
+    },
+    {
+      "id": "F15",
+      "claim": "Controller restart recovery blocks new scoped admissions until the entire scope has no existing flows.",
+      "evidence_status": "open_gap",
+      "package_evidence": [
+        "patches/xray-lua-research.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Conservative capacity safety trades availability; not durable production recovery."
+    },
+    {
+      "id": "F16",
+      "claim": "A recorded local microbenchmark favored preparing invariant Lua tables at VM initialization.",
+      "evidence_status": "historical_summary",
+      "package_evidence": [
+        "patches/xray-lua-research.patch",
+        "docs/BENCHMARKS.md"
+      ],
+      "limit": "About 759 versus 2562 ns/op in one Windows microbenchmark; raw output is not exported; no full-solution ranking follows from it."
+    },
+    {
+      "id": "F17",
+      "claim": "Missing first native policy and panel legacy suppression have a startup ownership gap.",
+      "evidence_status": "open_gap",
+      "package_evidence": [
+        "patches/xray-native.patch",
+        "patches/panel-integration.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Components were reproduced separately; the combined simultaneous failure is an inference, not an end-to-end test."
+    },
+    {
+      "id": "F18",
+      "claim": "Panel and core disagree about a trailing empty CSV token.",
+      "evidence_status": "open_gap",
+      "package_evidence": [
+        "patches/xray-native.patch",
+        "patches/panel-integration.patch"
+      ],
+      "limit": "The ordinary synthetic account name is valid; the trailing comma reproduces the disagreement. The flaw remains."
+    },
+    {
+      "id": "F19",
+      "claim": "Replacing the custom core with stock removes native enforcement without a process-bound ownership handshake.",
+      "evidence_status": "open_gap",
+      "package_evidence": [
+        "patches/panel-integration.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Source-path inference, not a performed production update."
+    },
+    {
+      "id": "F20",
+      "claim": "Lease or heartbeat expiry alone does not establish that a previously admitted flow ended.",
+      "evidence_status": "offline_model",
+      "package_evidence": [
+        "scripts/coordination_model.py",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Nine model diagnostics include counterexamples; they are not an operational distributed coordinator or proof of WAN safety."
+    },
+    {
+      "id": "F21",
+      "claim": "The earlier expiry-and-reassign proposal is restricted by confirmed closure, valid fencing or retained uncertain ownership.",
+      "evidence_status": "superseded_proposal",
+      "package_evidence": [
+        "scripts/coordination_model.py",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "The old proposal is not published as a safe final architecture."
+    },
+    {
+      "id": "F22",
+      "claim": "V2bX is a server backend/embedded-core integration precedent, not a plugin attached to a stock running Xray binary.",
+      "evidence_status": "snapshot_research",
+      "package_evidence": [
+        "docs/SOURCES.md",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Version-specific research; no installed compatibility promise and no blanket claim that newer forks lack XHTTP."
+    },
+    {
+      "id": "F23",
+      "claim": "Selected-panel and subscription-HWID research is not a complete installed-system benchmark or a tunnel-admission guarantee.",
+      "evidence_status": "snapshot_research",
+      "package_evidence": [
+        "docs/SOURCES.md",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Absence in selected paths is not absence in all branches/versions; no universal panel ranking."
+    },
+    {
+      "id": "F24",
+      "claim": "The first Lua functional run failed the socket audit; a loopback-constrained revision passed all checks.",
+      "evidence_status": "recorded_measurement",
+      "package_evidence": [
+        "measurements/functional.json",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "The failure is retained; the outbound adjustment was to a synthetic fixture only."
+    },
+    {
+      "id": "F25",
+      "claim": "Historical postchecks recorded unchanged production invariants and cleanup of owned lab processes.",
+      "evidence_status": "historical_audit_summary",
+      "package_evidence": [
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Private host fingerprints/raw guard logs are not exported. This stage did not re-query a live server and did not activate the prototype."
+    },
+    {
+      "id": "F26",
+      "claim": "The panel publisher does not yet provide complete native session controls or the old allowlist/ban-duration contract.",
+      "evidence_status": "open_gap",
+      "package_evidence": [
+        "patches/panel-integration.patch",
+        "patches/xray-native.patch",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Only cap/enable publishing and selected-account legacy suppression were prototyped; UI/API and readiness integration are unfinished."
+    },
+    {
+      "id": "F27",
+      "claim": "Production-wide CPU non-regression, multi-day leak freedom and native cross-country coordination are not demonstrated.",
+      "evidence_status": "not_demonstrated",
+      "package_evidence": [
+        "docs/BENCHMARKS.md",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Bounded three-sample tests and co-located Lua cores cannot establish these stronger conclusions."
+    },
+    {
+      "id": "F28",
+      "claim": "Each older completed edge scan had 21 addresses/210 attempts; three addresses showed multiple reported egresses.",
+      "evidence_status": "recorded_probe",
+      "package_evidence": [
+        "measurements/edge-observations.json",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Direct HTTPS traces, not complete VLESS/XHTTP tests or attribution of routing cause. All third-run ECH attempts failed setup."
+    },
+    {
+      "id": "F29",
+      "claim": "The final expanded scan attempted 65 addresses/650 samples: 52 had one observed egress and 13 had none.",
+      "evidence_status": "recorded_probe",
+      "package_evidence": [
+        "measurements/edge-observations.json",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "No rotation in successful samples is not permanent fixed identity; unknown addresses and the unmatched separate 69-address input remain unresolved."
+    },
+    {
+      "id": "F30",
+      "claim": "Network labels and VPN/TUN-off state were user-reported, not independently captured by the scanner metadata.",
+      "evidence_status": "evidence_boundary",
+      "package_evidence": [
+        "measurements/edge-observations.json",
+        "docs/FINDINGS.md"
+      ],
+      "limit": "Missing metadata does not disprove user attribution, but is not independent verification."
+    }
+  ]
+}

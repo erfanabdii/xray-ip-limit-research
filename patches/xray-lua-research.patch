@@ -1,0 +1,1459 @@
+diff --git a/app/router/validation_pass4_lua_test.go b/app/router/validation_pass4_lua_test.go
+new file mode 100644
+--- /dev/null
++++ b/app/router/validation_pass4_lua_test.go
+@@ -0,0 +1,180 @@
++package router
++
++import (
++	"context"
++	"errors"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/lua"
++	"github.com/xtls/xray-core/common/net"
++	glua "github.com/yuin/gopher-lua"
++)
++
++func TestDiagnosticLuaRouteSeesUserAndSourceAndCanChooseBlockTag(t *testing.T) {
++	r := startLuaRouter(t, `
++function HandleRoute(ctx, inboundTag, sourcePort, targetPort, localPort,
++    targetDomain, network, protocol, user)
++    local sources = ctx:GetSourceIPs()
++    if user == "user@example.com" and #sources == 1 and
++        sources[1]:String() == "127.0.0.2" then
++        return "block", "lua-user-source-match"
++    end
++    return "allow", "lua-fallback"
++end`, nil, &Config{Rule: []*RoutingRule{{
++		TargetTag: &RoutingRule_Tag{Tag: "block"},
++		Networks:  []net.Network{net.Network_TCP},
++	}}})
++
++	route, err := r.PickRoute(newLuaRouteTestContext())
++	if err != nil {
++		t.Fatal(err)
++	}
++	if route == nil || route.GetOutboundTag() != "block" || route.GetRuleTag() != "lua-user-source-match" {
++		t.Fatalf("route = %v; want configured block tag and Lua match rule", route)
++	}
++}
++
++func TestDiagnosticLuaPoolStatesDoNotShareNaiveAccountIPCap(t *testing.T) {
++	path := writeRouteScript(t, `
++accountIPs = {}
++function AdmitIP(user, ip, cap)
++    local ips = accountIPs[user]
++    if ips == nil then
++        ips = {}
++        accountIPs[user] = ips
++    end
++    if ips[ip] then return true end
++    local count = 0
++    for _ in pairs(ips) do count = count + 1 end
++    if count >= cap then return false end
++    ips[ip] = true
++    return true
++end`)
++	program, err := lua.CompileFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool, err := lua.NewPool(context.Background(), time.Second,
++		program.NewStateFactory(time.Second, nil, nil))
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pool.Close()
++
++	first, err := pool.Acquire(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pool.Release(first, true)
++	second, err := pool.Acquire(nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer pool.Release(second, true)
++	if first == second {
++		t.Fatal("simultaneous pool acquisitions returned the same Lua state")
++	}
++
++	firstAccepted := callDiagnosticLuaAdmit(t, first, "same-account", "198.51.100.10", 1)
++	secondAccepted := callDiagnosticLuaAdmit(t, second, "same-account", "198.51.100.11", 1)
++	if !firstAccepted || !secondAccepted {
++		t.Fatalf("diagnostic setup did not reproduce separate-state acceptance: first=%t second=%t", firstAccepted, secondAccepted)
++	}
++}
++
++func callDiagnosticLuaAdmit(t *testing.T, L *glua.LState, user, ip string, cap int) bool {
++	t.Helper()
++	fn := L.GetGlobal("AdmitIP")
++	if fn.Type() != glua.LTFunction {
++		t.Fatal("AdmitIP is not a Lua function")
++	}
++	if err := L.CallByParam(glua.P{Fn: fn, NRet: 1, Protect: true},
++		glua.LString(user), glua.LString(ip), glua.LNumber(cap)); err != nil {
++		t.Fatal(err)
++	}
++	result, ok := L.Get(-1).(glua.LBool)
++	L.Pop(1)
++	if !ok {
++		t.Fatal("AdmitIP did not return a boolean")
++	}
++	return bool(result)
++}
++
++func TestDiagnosticLuaPoolReuseRetainsGlobalsAndExposesNoLifecycleHook(t *testing.T) {
++	r := startLuaRouter(t, `
++routeContextHasNoLifecycleHooks = false
++function HandleRoute(ctx)
++    routeContextHasNoLifecycleHooks = ctx.Close == nil and ctx.Cancel == nil and
++        ctx.Done == nil and ctx.Release == nil and ctx.RefCount == nil and
++        ctx.AddRef == nil and ctx.RemoveRef == nil
++    assert(routeContextHasNoLifecycleHooks)
++    assert(package.preload["xray.stats"] == nil and package.loaded["xray.stats"] == nil)
++    return "block", "lua-diagnostic"
++end`, nil, nil)
++
++	route, err := r.PickRoute(newLuaRouteTestContext())
++	if err != nil || route == nil || route.GetOutboundTag() != "block" {
++		t.Fatalf("diagnostic routing = %v, %v; want block", route, err)
++	}
++
++	firstFixtureCtx, cancelFirstFixture := context.WithCancel(context.Background())
++	var firstState *glua.LState
++	var firstExecutionCtx context.Context
++	err = r.script.pool.WithState(firstFixtureCtx, time.Second, func(L *glua.LState) error {
++		firstState = L
++		firstExecutionCtx = L.Context()
++		if L.GetGlobal("routeContextHasNoLifecycleHooks") != glua.LTrue {
++			return errors.New("routing context exposed a close, cancel, or refcount hook")
++		}
++		if L.GetGlobal("poolProbeCount") != glua.LNil {
++			return errors.New("poolProbeCount was unexpectedly initialized")
++		}
++		L.SetGlobal("poolProbeCount", glua.LNumber(1))
++		packageTable, ok := L.GetGlobal("package").(*glua.LTable)
++		if !ok {
++			return errors.New("Lua package table is unavailable")
++		}
++		preload, ok := packageTable.RawGetString("preload").(*glua.LTable)
++		if !ok {
++			return errors.New("Lua package.preload table is unavailable")
++		}
++		loaded, ok := packageTable.RawGetString("loaded").(*glua.LTable)
++		if !ok {
++			return errors.New("Lua package.loaded table is unavailable")
++		}
++		if preload.RawGetString("xray.stats") != glua.LNil || loaded.RawGetString("xray.stats") != glua.LNil {
++			return errors.New("xray.stats is unexpectedly present in package.preload")
++		}
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	cancelFirstFixture()
++	if firstFixtureCtx.Err() == nil || firstExecutionCtx == nil || firstExecutionCtx.Err() == nil {
++		t.Fatal("first fixture/execution context did not end")
++	}
++	if firstState.Context() != nil {
++		t.Fatal("released Lua state retained its execution context")
++	}
++
++	secondFixtureCtx, cancelSecondFixture := context.WithCancel(context.Background())
++	defer cancelSecondFixture()
++	err = r.script.pool.WithState(secondFixtureCtx, time.Second, func(L *glua.LState) error {
++		if L != firstState {
++			return errors.New("pool did not reacquire the released Lua state")
++		}
++		if L.GetGlobal("poolProbeCount") != glua.LNumber(1) {
++			return errors.New("Lua globals did not survive release and reacquisition")
++		}
++		if L.Context() == nil || L.Context() == firstExecutionCtx {
++			return errors.New("reacquired Lua state did not receive a fresh execution context")
++		}
++		L.SetGlobal("poolProbeCount", glua.LNumber(2))
++		return nil
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++}
+diff --git a/common/lua/validation_pass5_pool_test.go b/common/lua/validation_pass5_pool_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/lua/validation_pass5_pool_test.go
+@@ -0,0 +1,341 @@
++package lua
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	glua "github.com/yuin/gopher-lua"
++)
++
++const pass5LifecycleLua = `
++local lookup = {}
++for i = 1, 16 do
++	lookup[i] = i * 3 + 10
++end
++pass5_init()
++function route(k, x)
++	return x + lookup[k]
++end
++`
++
++const pass5CachedLookupLua = `
++local lookup = {}
++for i = 1, 16 do
++	lookup[i] = i * 3 + 10
++end
++function route(k, x)
++	return x + lookup[k]
++end
++`
++
++const pass5RebuiltLookupLua = `
++function route(k, x)
++	local lookup = {}
++	for i = 1, 16 do
++		lookup[i] = i * 3 + 10
++	end
++	return x + lookup[k]
++end
++`
++
++func pass5CompileFile(t testing.TB, name, source string) *Program {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), name)
++	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	program, err := CompileFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	return program
++}
++
++func pass5CallRoute(L *glua.LState, key, input int) (int, error) {
++	fn := L.GetGlobal("route")
++	if fn.Type() != glua.LTFunction {
++		return 0, errors.New("Lua global route is not a function")
++	}
++	L.Push(fn)
++	L.Push(glua.LNumber(key))
++	L.Push(glua.LNumber(input))
++	if err := L.PCall(2, 1, nil); err != nil {
++		return 0, err
++	}
++	value := L.Get(-1)
++	L.Pop(1)
++	number, ok := value.(glua.LNumber)
++	if !ok {
++		return 0, fmt.Errorf("route returned %s, want number", value.Type())
++	}
++	return int(number), nil
++}
++
++func TestValidationPass5PoolCompileReuseBurstAndIdleCap(t *testing.T) {
++	program := pass5CompileFile(t, "lifecycle.lua", pass5LifecycleLua)
++	var created atomic.Int64
++	var topLevelRuns atomic.Int64
++	factory := func(ctx context.Context) (*glua.LState, error) {
++		state, err := program.NewState(ctx, func(L *glua.LState) {
++			L.SetGlobal("pass5_init", L.NewFunction(func(*glua.LState) int {
++				topLevelRuns.Add(1)
++				return 0
++			}))
++		}, nil)
++		if err == nil {
++			created.Add(1)
++		}
++		return state, err
++	}
++
++	pool, err := NewPool(context.Background(), time.Second, factory)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(pool.Close)
++	if got := created.Load(); got != 1 {
++		t.Fatalf("NewPool created %d states, want its one initial state", got)
++	}
++	if got := topLevelRuns.Load(); got != 1 {
++		t.Fatalf("top-level ran %d times after NewPool, want once for its initial VM", got)
++	}
++
++	pool.mu.Lock()
++	seed := pool.idle[0]
++	pool.mu.Unlock()
++	var coldState *glua.LState
++	var coldContext context.Context
++	err = pool.WithState(nil, 0, func(L *glua.LState) error {
++		coldState = L
++		coldContext = L.Context()
++		got, err := pass5CallRoute(L, 7, 41)
++		if err == nil && got != 72 {
++			return fmt.Errorf("cold route returned %d, want 72", got)
++		}
++		return err
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if coldState != seed {
++		t.Fatal("first route call did not use NewPool's initialized state")
++	}
++	if !errors.Is(coldContext.Err(), context.Canceled) {
++		t.Fatalf("WithState did not run its deferred cancel after cold call: %v", coldContext.Err())
++	}
++
++	for i := 0; i < 16; i++ {
++		var warmState *glua.LState
++		err := pool.WithState(nil, 0, func(L *glua.LState) error {
++			warmState = L
++			got, err := pass5CallRoute(L, 7, 41)
++			if err == nil && got != 72 {
++				return fmt.Errorf("warm route returned %d, want 72", got)
++			}
++			return err
++		})
++		if err != nil {
++			t.Fatal(err)
++		}
++		if warmState != seed {
++			t.Fatalf("warm call %d did not reuse the seed VM", i)
++		}
++	}
++	if got := created.Load(); got != 1 {
++		t.Fatalf("cold and warm calls created %d states, want 1", got)
++	}
++	if got := topLevelRuns.Load(); got != 1 {
++		t.Fatalf("cold and warm calls ran top-level %d times, want 1", got)
++	}
++
++	const burstSize = 32
++	type acquireResult struct {
++		state *glua.LState
++		err   error
++	}
++
++	acquired := make(chan acquireResult, burstSize)
++	release := make(chan struct{})
++	released := make(chan *glua.LState, burstSize)
++	for i := 0; i < burstSize; i++ {
++		go func() {
++			state, err := pool.Acquire(nil)
++			acquired <- acquireResult{state: state, err: err}
++			if err != nil {
++				return
++			}
++			<-release
++			pool.Release(state, true)
++			released <- state
++		}()
++	}
++
++	borrowed := make([]*glua.LState, 0, burstSize)
++	var acquireErr error
++	for i := 0; i < burstSize; i++ {
++		result := <-acquired
++		if result.err != nil {
++			if acquireErr == nil {
++				acquireErr = result.err
++			}
++			continue
++		}
++		borrowed = append(borrowed, result.state)
++	}
++	close(release)
++	for range borrowed {
++		<-released
++	}
++	if acquireErr != nil {
++		t.Fatalf("burst Acquire failed: %v", acquireErr)
++	}
++	if len(borrowed) != burstSize {
++		t.Fatalf("burst borrowed %d states, want %d simultaneously", len(borrowed), burstSize)
++	}
++	if got := created.Load(); got != burstSize {
++		t.Fatalf("cold+burst factory created %d states, want %d", got, burstSize)
++	}
++	if got := topLevelRuns.Load(); got != burstSize {
++		t.Fatalf("cold+burst top-level executions = %d, want one per %d VM", got, burstSize)
++	}
++
++	borrowedSet := make(map[*glua.LState]bool, len(borrowed))
++	for _, state := range borrowed {
++		borrowedSet[state] = true
++	}
++	pool.mu.Lock()
++	idle := append([]*glua.LState(nil), pool.idle...)
++	pool.mu.Unlock()
++	if len(idle) != maxIdleStates {
++		t.Fatalf("pool retained %d idle states after burst, want %d", len(idle), maxIdleStates)
++	}
++	idleSet := make(map[*glua.LState]bool, len(idle))
++	for _, state := range idle {
++		if !borrowedSet[state] {
++			t.Fatal("idle pool contains a state that was not borrowed in the forced burst")
++		}
++		if state.IsClosed() {
++			t.Fatal("idle pool retained a closed state")
++		}
++		idleSet[state] = true
++	}
++	open, closed := 0, 0
++	for _, state := range borrowed {
++		if state.IsClosed() {
++			closed++
++		} else {
++			open++
++		}
++	}
++	if open != maxIdleStates || closed != burstSize-maxIdleStates {
++		t.Fatalf("after burst release, open=%d closed=%d, want open=%d closed=%d", open, closed, maxIdleStates, burstSize-maxIdleStates)
++	}
++
++	for i := 0; i < maxIdleStates; i++ {
++		state, err := pool.Acquire(nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if !idleSet[state] {
++			t.Fatalf("warm acquire %d did not draw from the retained idle set", i)
++		}
++		got, err := pass5CallRoute(state, 7, 41)
++		if err == nil && got != 72 {
++			err = fmt.Errorf("warm route returned %d, want 72", got)
++		}
++		pool.Release(state, err == nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++	if got := created.Load(); got != burstSize {
++		t.Fatalf("next %d warm acquisitions increased created states to %d", maxIdleStates, got)
++	}
++	if got := topLevelRuns.Load(); got != burstSize {
++		t.Fatalf("next %d warm acquisitions increased top-level runs to %d", maxIdleStates, got)
++	}
++}
++
++func TestValidationPass5PoolShortTimeoutCancelsLuaAndWorkContext(t *testing.T) {
++	program := pass5CompileFile(t, "timeout.lua", `function spin() while true do end end`)
++	var created atomic.Int64
++	factory := func(ctx context.Context) (*glua.LState, error) {
++		state, err := program.NewState(ctx, nil, nil)
++		if err == nil {
++			created.Add(1)
++		}
++		return state, err
++	}
++	pool, err := NewPool(context.Background(), 20*time.Millisecond, factory)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(pool.Close)
++
++	var state *glua.LState
++	var workContext context.Context
++	started := time.Now()
++	err = pool.WithState(nil, 0, func(L *glua.LState) error {
++		state = L
++		workContext = L.Context()
++		L.Push(L.GetGlobal("spin"))
++		return L.PCall(0, 0, nil)
++	})
++	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
++		t.Fatalf("infinite Lua work error = %v, want a Lua error containing context deadline exceeded", err)
++	}
++	if elapsed := time.Since(started); elapsed < 10*time.Millisecond || elapsed > time.Second {
++		t.Fatalf("short timeout returned after %v, want prompt deadline cancellation", elapsed)
++	}
++	if !errors.Is(workContext.Err(), context.DeadlineExceeded) {
++		t.Fatalf("Lua work context error = %v, want context deadline exceeded", workContext.Err())
++	}
++	if state == nil || !state.IsClosed() {
++		t.Fatal("state that returned a Lua timeout error was not closed")
++	}
++	if got := created.Load(); got != 1 {
++		t.Fatalf("short-timeout case created %d states, want 1", got)
++	}
++}
++
++func BenchmarkValidationPass5PoolRoute(b *testing.B) {
++	for _, tc := range []struct {
++		name   string
++		source string
++	}{
++		{name: "CachedTopLevel16EntryLookup", source: pass5CachedLookupLua},
++		{name: "Rebuilt16EntryLookupPerCall", source: pass5RebuiltLookupLua},
++	} {
++		b.Run(tc.name, func(b *testing.B) {
++			program := pass5CompileFile(b, "route.lua", tc.source)
++			factory := program.NewStateFactory(time.Second, nil, nil)
++			pool, err := NewPool(context.Background(), time.Second, factory)
++			if err != nil {
++				b.Fatal(err)
++			}
++			defer pool.Close()
++
++			b.ReportAllocs()
++			b.ResetTimer()
++			for i := 0; i < b.N; i++ {
++				err := pool.WithState(nil, 0, func(L *glua.LState) error {
++					got, err := pass5CallRoute(L, 7, 41)
++					if err == nil && got != 72 {
++						return fmt.Errorf("route returned %d, want 72", got)
++					}
++					return err
++				})
++				if err != nil {
++					b.Fatal(err)
++				}
++			}
++		})
++	}
++}
+diff --git a/cmd/validation5-controller/main.go b/cmd/validation5-controller/main.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/validation5-controller/main.go
+@@ -0,0 +1,646 @@
++package main
++
++import (
++	"context"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"flag"
++	"fmt"
++	"io"
++	"net"
++	"net/http"
++	"os"
++	"os/signal"
++	"regexp"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"time"
++
++	"github.com/miekg/dns"
++	statscommand "github.com/xtls/xray-core/app/stats/command"
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/credentials/insecure"
++)
++
++const (
++	rpcTimeout       = 150 * time.Millisecond
++	maxDNSInFlight   = 64
++	maxConfigBytes   = 64 * 1024
++	maxControlBytes  = 4 * 1024
++	maxAccounts      = 16
++	maxNodes         = 2
++	permitAddress    = "127.0.0.1"
++	denyAddress      = "127.0.0.2"
++	adminNonceHeader = "X-Fixture-Nonce"
++)
++
++var fixtureEmailRE = regexp.MustCompile(`^fixture-[a-z0-9][a-z0-9-]{0,62}@example\.invalid$`)
++
++type Config struct {
++	DNS    string   `json:"dns"`
++	Admin  string   `json:"admin"`
++	APIs   []string `json:"apis"`
++	Nonce  string   `json:"nonce"`
++	Emails []string `json:"emails"`
++	Cap    int      `json:"cap"`
++	PollMS int      `json:"poll_ms"`
++}
++
++type grant struct {
++	email string
++	ip    string
++}
++
++type apiEndpoint struct {
++	addr   string
++	client statscommand.StatsServiceClient
++	conn   *grpc.ClientConn
++}
++
++type Controller struct {
++	mu          sync.Mutex
++	apis        []apiEndpoint
++	emailSet    map[string]struct{}
++	owners      map[grant]struct{}
++	cap         int
++	statsPaused bool
++	healthy     bool
++	recovering  bool
++	pollOK      uint64
++	pollErrors  uint64
++	grants      uint64
++	denied      uint64
++	releases    uint64
++	delayMS     atomic.Int32
++}
++
++type Status struct {
++	PollOK     uint64                     `json:"poll_ok"`
++	PollErrors uint64                     `json:"errors"`
++	Grants     uint64                     `json:"grants"`
++	Denied     uint64                     `json:"denied"`
++	Releases   uint64                     `json:"releases"`
++	Recovering bool                       `json:"recovering"`
++	Healthy    bool                       `json:"healthy"`
++	Owners     map[string]map[string]bool `json:"owners"`
++	DelayMS    int32                      `json:"delay_ms"`
++}
++
++func main() {
++	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
++	configPath := flags.String("config", "", "path to controller JSON configuration")
++	_ = flags.Parse(os.Args[1:])
++	if *configPath == "" || flags.NArg() != 0 {
++		fmt.Fprintln(os.Stderr, "usage: validation5-controller -config <JSON path>")
++		os.Exit(2)
++	}
++
++	configBytes, err := readConfig(*configPath)
++	if err != nil {
++		fatal(err)
++	}
++	cfg, err := decodeConfig(configBytes)
++	if err != nil {
++		fatal(err)
++	}
++
++	controller, conns, err := newLiveController(cfg)
++	if err != nil {
++		fatal(err)
++	}
++	defer func() {
++		for _, conn := range conns {
++			_ = conn.Close()
++		}
++	}()
++
++	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
++	defer stop()
++	if err := serve(ctx, cfg, controller); err != nil && !errors.Is(err, context.Canceled) {
++		fatal(err)
++	}
++}
++
++func fatal(err error) {
++	fmt.Fprintln(os.Stderr, err)
++	os.Exit(1)
++}
++
++func readConfig(path string) ([]byte, error) {
++	f, err := os.Open(path)
++	if err != nil {
++		return nil, fmt.Errorf("open config: %w", err)
++	}
++	defer f.Close()
++	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
++	if err != nil {
++		return nil, fmt.Errorf("read config: %w", err)
++	}
++	if len(data) > maxConfigBytes {
++		return nil, errors.New("config exceeds 64 KiB")
++	}
++	return data, nil
++}
++
++func decodeConfig(data []byte) (Config, error) {
++	var cfg Config
++	dec := json.NewDecoder(strings.NewReader(string(data)))
++	dec.DisallowUnknownFields()
++	if err := dec.Decode(&cfg); err != nil {
++		return Config{}, fmt.Errorf("decode config: %w", err)
++	}
++	if err := ensureEOF(dec); err != nil {
++		return Config{}, err
++	}
++	if err := validateConfig(cfg); err != nil {
++		return Config{}, err
++	}
++	return cfg, nil
++}
++
++func ensureEOF(dec *json.Decoder) error {
++	var extra any
++	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
++		if err == nil {
++			return errors.New("config must contain one JSON value")
++		}
++		return fmt.Errorf("trailing config data: %w", err)
++	}
++	return nil
++}
++
++func validateConfig(cfg Config) error {
++	if _, err := validateLoopbackAddress("dns", cfg.DNS); err != nil {
++		return err
++	}
++	if _, err := validateLoopbackAddress("admin", cfg.Admin); err != nil {
++		return err
++	}
++	if len(cfg.APIs) < 1 || len(cfg.APIs) > maxNodes {
++		return fmt.Errorf("apis must contain 1 through %d loopback addresses", maxNodes)
++	}
++	seenAPIs := make(map[string]struct{}, len(cfg.APIs))
++	for i, addr := range cfg.APIs {
++		canonical, err := validateLoopbackAddress(fmt.Sprintf("apis[%d]", i), addr)
++		if err != nil {
++			return err
++		}
++		if _, exists := seenAPIs[canonical]; exists {
++			return fmt.Errorf("apis[%d] duplicates an API endpoint", i)
++		}
++		seenAPIs[canonical] = struct{}{}
++	}
++	if len(cfg.Emails) < 1 || len(cfg.Emails) > maxAccounts {
++		return fmt.Errorf("emails must contain 1 through %d fixture accounts", maxAccounts)
++	}
++	seenEmails := make(map[string]struct{}, len(cfg.Emails))
++	for i, email := range cfg.Emails {
++		if !fixtureEmailRE.MatchString(email) {
++			return fmt.Errorf("emails[%d] must match fixture-...@example.invalid", i)
++		}
++		if _, exists := seenEmails[email]; exists {
++			return fmt.Errorf("emails[%d] duplicates a fixture account", i)
++		}
++		seenEmails[email] = struct{}{}
++	}
++	if len(cfg.Nonce) < 16 || len(cfg.Nonce) > 62 || len(cfg.Nonce)%2 != 0 || strings.ToLower(cfg.Nonce) != cfg.Nonce {
++		return errors.New("nonce must be 16 through 62 lowercase hexadecimal characters with even length")
++	}
++	if _, err := hex.DecodeString(cfg.Nonce); err != nil {
++		return errors.New("nonce must be hexadecimal")
++	}
++	if cfg.Cap < 1 || cfg.Cap > 3 {
++		return errors.New("cap must be from 1 through 3")
++	}
++	if cfg.PollMS < 10 || cfg.PollMS > 60000 {
++		return errors.New("poll_ms must be from 10 through 60000")
++	}
++	return nil
++}
++
++func validateLoopbackAddress(field, addr string) (string, error) {
++	host, portText, err := net.SplitHostPort(addr)
++	if err != nil {
++		return "", fmt.Errorf("%s must be an explicit 127.0.0.1:port address: %w", field, err)
++	}
++	if host != "127.0.0.1" {
++		return "", fmt.Errorf("%s host must be exactly 127.0.0.1", field)
++	}
++	port, err := strconv.Atoi(portText)
++	if err != nil || port < 1 || port > 65535 {
++		return "", fmt.Errorf("%s port must be an integer from 1 through 65535", field)
++	}
++	return net.JoinHostPort(host, strconv.Itoa(port)), nil
++}
++
++func newLiveController(cfg Config) (*Controller, []*grpc.ClientConn, error) {
++	clients := make([]statscommand.StatsServiceClient, 0, len(cfg.APIs))
++	conns := make([]*grpc.ClientConn, 0, len(cfg.APIs))
++	for _, addr := range cfg.APIs {
++		conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
++		if err != nil {
++			for _, opened := range conns {
++				_ = opened.Close()
++			}
++			return nil, nil, fmt.Errorf("create StatsService client for %s: %w", addr, err)
++		}
++		conns = append(conns, conn)
++		clients = append(clients, statscommand.NewStatsServiceClient(conn))
++	}
++	return newController(cfg, clients), conns, nil
++}
++
++func newController(cfg Config, clients []statscommand.StatsServiceClient) *Controller {
++	emails := make(map[string]struct{}, len(cfg.Emails))
++	for _, email := range cfg.Emails {
++		emails[email] = struct{}{}
++	}
++	apis := make([]apiEndpoint, len(clients))
++	for i, client := range clients {
++		addr := ""
++		if i < len(cfg.APIs) {
++			addr = cfg.APIs[i]
++		}
++		apis[i] = apiEndpoint{addr: addr, client: client}
++	}
++	c := &Controller{
++		apis:       apis,
++		emailSet:   emails,
++		owners:     make(map[grant]struct{}),
++		cap:        cfg.Cap,
++		recovering: true,
++	}
++	c.delayMS.Store(0)
++	return c
++}
++
++func (c *Controller) admit(email, ip string) bool {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if !c.healthy || c.recovering {
++		c.denied++
++		return false
++	}
++	key := grant{email: email, ip: ip}
++	if _, exists := c.owners[key]; exists {
++		return true
++	}
++	uniqueIPs := 0
++	for owner := range c.owners {
++		if owner.email == email {
++			uniqueIPs++
++		}
++	}
++	if uniqueIPs >= c.cap {
++		c.denied++
++		return false
++	}
++	c.owners[key] = struct{}{}
++	c.grants++
++	return true
++}
++
++func (c *Controller) deny() {
++	c.mu.Lock()
++	c.denied++
++	c.mu.Unlock()
++}
++
++func (c *Controller) pollOnce(ctx context.Context) {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if ctx.Err() != nil {
++		return
++	}
++	if c.statsPaused {
++		c.healthy = false
++		c.pollErrors++
++		return
++	}
++	active := make(map[grant]struct{})
++	activeAccount := false
++	for _, api := range c.apis {
++		if api.client == nil {
++			c.healthy = false
++			c.pollErrors++
++			return
++		}
++		rpcCtx, cancel := context.WithTimeout(ctx, rpcTimeout)
++		response, err := api.client.GetUsersStats(rpcCtx, &statscommand.GetUsersStatsRequest{IncludeTraffic: false, Reset_: false})
++		cancel()
++		if err != nil || response == nil {
++			c.healthy = false
++			c.pollErrors++
++			return
++		}
++		for _, user := range response.GetUsers() {
++			if user == nil {
++				continue
++			}
++			email := user.GetEmail()
++			if _, scoped := c.emailSet[email]; !scoped {
++				continue
++			}
++			for _, entry := range user.GetIps() {
++				if entry == nil || entry.GetIp() == "" {
++					continue
++				}
++				activeAccount = true
++				active[grant{email: email, ip: entry.GetIp()}] = struct{}{}
++			}
++		}
++	}
++	c.pollOK++
++	c.healthy = true
++	if c.recovering {
++		if !activeAccount {
++			c.recovering = false
++		}
++		return
++	}
++	for owner := range c.owners {
++		if _, present := active[owner]; !present {
++			delete(c.owners, owner)
++			c.releases++
++		}
++	}
++}
++
++func (c *Controller) pollLoop(ctx context.Context, pollMS int) {
++	c.pollOnce(ctx)
++	ticker := time.NewTicker(time.Duration(pollMS) * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++			c.pollOnce(ctx)
++		}
++	}
++}
++
++func (c *Controller) status() Status {
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	owners := make(map[string]map[string]bool)
++	for owner := range c.owners {
++		if owners[owner.email] == nil {
++			owners[owner.email] = make(map[string]bool)
++		}
++		owners[owner.email][owner.ip] = true
++	}
++	return Status{
++		PollOK: c.pollOK, PollErrors: c.pollErrors,
++		Grants: c.grants, Denied: c.denied, Releases: c.releases,
++		Recovering: c.recovering, Healthy: c.healthy,
++		Owners: owners, DelayMS: c.delayMS.Load(),
++	}
++}
++
++func (c *Controller) control(req controlRequest) error {
++	if req.DelayMS != nil && (*req.DelayMS < 0 || *req.DelayMS > 1000) {
++		return errors.New("delay_ms must be from 0 through 1000")
++	}
++	if req.Cap != nil && (*req.Cap < 1 || *req.Cap > 3) {
++		return errors.New("cap must be from 1 through 3")
++	}
++	if req.DelayMS == nil && req.StatsPaused == nil && req.Cap == nil {
++		return errors.New("control must set delay_ms, stats_paused, or cap")
++	}
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	if req.Cap != nil {
++		c.cap = *req.Cap
++	}
++	if req.StatsPaused != nil {
++		c.statsPaused = *req.StatsPaused
++		if c.statsPaused {
++			c.healthy = false
++		}
++	}
++	if req.DelayMS != nil {
++		c.delayMS.Store(int32(*req.DelayMS))
++	}
++	return nil
++}
++
++func serve(ctx context.Context, cfg Config, controller *Controller) error {
++	dnsConn, err := net.ListenPacket("udp", cfg.DNS)
++	if err != nil {
++		return fmt.Errorf("listen DNS on %s: %w", cfg.DNS, err)
++	}
++	adminListener, err := net.Listen("tcp", cfg.Admin)
++	if err != nil {
++		_ = dnsConn.Close()
++		return fmt.Errorf("listen admin on %s: %w", cfg.Admin, err)
++	}
++
++	stopDNS := make(chan struct{})
++	dnsServer := &dns.Server{PacketConn: dnsConn, Handler: dnsHandler{controller: controller, emails: cfg.Emails, nonce: cfg.Nonce, stop: stopDNS, semaphore: make(chan struct{}, maxDNSInFlight)}, ReadTimeout: 3 * time.Second, WriteTimeout: 3 * time.Second}
++	httpServer := &http.Server{
++		Handler:           adminHandler{controller: controller, nonce: cfg.Nonce},
++		ReadHeaderTimeout: 2 * time.Second,
++		ReadTimeout:       3 * time.Second,
++		WriteTimeout:      3 * time.Second,
++		IdleTimeout:       15 * time.Second,
++	}
++
++	runCtx, cancelRun := context.WithCancel(ctx)
++	defer cancelRun()
++	var servers sync.WaitGroup
++	serverErr := make(chan error, 2)
++	servers.Add(2)
++	go func() {
++		defer servers.Done()
++		serverErr <- dnsServer.ActivateAndServe()
++	}()
++	go func() {
++		defer servers.Done()
++		serverErr <- httpServer.Serve(adminListener)
++	}()
++	var poller sync.WaitGroup
++	poller.Add(1)
++	go func() {
++		defer poller.Done()
++		controller.pollLoop(runCtx, cfg.PollMS)
++	}()
++
++	var runErr error
++	select {
++	case <-ctx.Done():
++	case runErr = <-serverErr:
++		if errors.Is(runErr, net.ErrClosed) || errors.Is(runErr, http.ErrServerClosed) {
++			runErr = nil
++		}
++	}
++	cancelRun()
++	close(stopDNS)
++	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++	defer cancel()
++	if err := httpServer.Shutdown(shutdownCtx); err != nil && runErr == nil {
++		runErr = fmt.Errorf("shutdown admin server: %w", err)
++	}
++	if err := dnsServer.Shutdown(); err != nil && runErr == nil {
++		runErr = fmt.Errorf("shutdown DNS server: %w", err)
++	}
++	_ = adminListener.Close()
++	_ = dnsConn.Close()
++	poller.Wait()
++	servers.Wait()
++	return runErr
++}
++
++type dnsHandler struct {
++	controller *Controller
++	emails     []string
++	nonce      string
++	stop       <-chan struct{}
++	semaphore  chan struct{}
++}
++
++func (h dnsHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
++	if req == nil || len(req.Question) != 1 || req.Question[0].Qtype != dns.TypeA || req.Question[0].Qclass != dns.ClassINET {
++		writeDNSReply(w, req, dns.RcodeRefused, "")
++		return
++	}
++	remote, _, err := net.SplitHostPort(w.RemoteAddr().String())
++	if err != nil || net.ParseIP(remote) == nil || !net.ParseIP(remote).IsLoopback() {
++		writeDNSReply(w, req, dns.RcodeRefused, "")
++		return
++	}
++	email, ip, ok := parseDecisionName(req.Question[0].Name, h.nonce, h.emails)
++	if !ok {
++		writeDNSReply(w, req, dns.RcodeRefused, "")
++		return
++	}
++	select {
++	case h.semaphore <- struct{}{}:
++		defer func() { <-h.semaphore }()
++	default:
++		h.controller.deny()
++		writeDNSReply(w, req, dns.RcodeSuccess, denyAddress)
++		return
++	}
++	if delay := time.Duration(h.controller.delayMS.Load()) * time.Millisecond; delay > 0 {
++		timer := time.NewTimer(delay)
++		defer timer.Stop()
++		select {
++		case <-timer.C:
++		case <-h.stop:
++			writeDNSReply(w, req, dns.RcodeRefused, "")
++			return
++		}
++	}
++	answer := denyAddress
++	if h.controller.admit(email, ip) {
++		answer = permitAddress
++	}
++	writeDNSReply(w, req, dns.RcodeSuccess, answer)
++}
++
++func parseDecisionName(qname, nonce string, emails []string) (string, string, bool) {
++	if qname == "" || !strings.HasSuffix(qname, ".") || qname != strings.ToLower(qname) {
++		return "", "", false
++	}
++	canonical := dns.Fqdn(qname)
++	labels := strings.Split(strings.TrimSuffix(canonical, "."), ".")
++	if len(labels) != 5 || labels[2] != nonce || labels[3] != "fixture" || labels[4] != "invalid" {
++		return "", "", false
++	}
++	if !strings.HasPrefix(labels[0], "u") || len(labels[0]) == 1 {
++		return "", "", false
++	}
++	index, err := strconv.Atoi(strings.TrimPrefix(labels[0], "u"))
++	if err != nil || index < 0 || index >= len(emails) || strconv.Itoa(index) != strings.TrimPrefix(labels[0], "u") {
++		return "", "", false
++	}
++	var ip string
++	switch labels[1] {
++	case "p198-51-100-10":
++		ip = "198.51.100.10"
++	case "p198-51-100-11":
++		ip = "198.51.100.11"
++	case "p198-51-100-12":
++		ip = "198.51.100.12"
++	default:
++		return "", "", false
++	}
++	return emails[index], ip, true
++}
++
++func writeDNSReply(w dns.ResponseWriter, req *dns.Msg, rcode int, answerIP string) {
++	if req == nil {
++		return
++	}
++	msg := new(dns.Msg)
++	msg.SetReply(req)
++	msg.Authoritative = true
++	msg.Rcode = rcode
++	if rcode == dns.RcodeSuccess && answerIP != "" {
++		msg.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 0}, A: net.ParseIP(answerIP).To4()}}
++	}
++	_ = w.WriteMsg(msg)
++}
++
++type controlRequest struct {
++	DelayMS     *int  `json:"delay_ms,omitempty"`
++	StatsPaused *bool `json:"stats_paused,omitempty"`
++	Cap         *int  `json:"cap,omitempty"`
++}
++
++type adminHandler struct {
++	controller *Controller
++	nonce      string
++}
++
++func (h adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
++	if r.Header.Get(adminNonceHeader) != h.nonce {
++		http.Error(w, "unauthorized", http.StatusForbidden)
++		return
++	}
++	switch {
++	case r.URL.Path == "/status" && r.Method == http.MethodGet:
++		writeJSON(w, http.StatusOK, h.controller.status())
++	case r.URL.Path == "/control" && r.Method == http.MethodPost:
++		req, err := decodeControl(w, r)
++		if err != nil {
++			http.Error(w, err.Error(), http.StatusBadRequest)
++			return
++		}
++		if err := h.controller.control(req); err != nil {
++			http.Error(w, err.Error(), http.StatusBadRequest)
++			return
++		}
++		writeJSON(w, http.StatusOK, h.controller.status())
++	case r.URL.Path == "/status" || r.URL.Path == "/control":
++		w.Header().Set("Allow", map[string]string{"/status": http.MethodGet, "/control": http.MethodPost}[r.URL.Path])
++		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++	default:
++		http.NotFound(w, r)
++	}
++}
++
++func decodeControl(w http.ResponseWriter, r *http.Request) (controlRequest, error) {
++	r.Body = http.MaxBytesReader(w, r.Body, maxControlBytes)
++	dec := json.NewDecoder(r.Body)
++	dec.DisallowUnknownFields()
++	var req controlRequest
++	if err := dec.Decode(&req); err != nil {
++		return controlRequest{}, fmt.Errorf("invalid control JSON: %w", err)
++	}
++	if err := ensureEOF(dec); err != nil {
++		return controlRequest{}, err
++	}
++	return req, nil
++}
++
++func writeJSON(w http.ResponseWriter, status int, value any) {
++	w.Header().Set("Content-Type", "application/json")
++	w.WriteHeader(status)
++	_ = json.NewEncoder(w).Encode(value)
++}
+diff --git a/cmd/validation5-controller/main_test.go b/cmd/validation5-controller/main_test.go
+new file mode 100644
+--- /dev/null
++++ b/cmd/validation5-controller/main_test.go
+@@ -0,0 +1,272 @@
++package main
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"sync"
++	"testing"
++
++	statscommand "github.com/xtls/xray-core/app/stats/command"
++	"google.golang.org/grpc"
++)
++
++type fakeStatsClient struct {
++	statscommand.StatsServiceClient
++	get func() (*statscommand.GetUsersStatsResponse, error)
++}
++
++func (f *fakeStatsClient) GetUsersStats(context.Context, *statscommand.GetUsersStatsRequest, ...grpc.CallOption) (*statscommand.GetUsersStatsResponse, error) {
++	return f.get()
++}
++
++func fixtureConfig() Config {
++	return Config{
++		DNS: "127.0.0.1:5300", Admin: "127.0.0.1:8080",
++		APIs: []string{"127.0.0.1:10085"}, Nonce: "0123456789abcdef",
++		Emails: []string{"fixture-a@example.invalid", "fixture-b@example.invalid"},
++		Cap:    2, PollMS: 100,
++	}
++}
++
++func testController(cfg Config, clients ...statscommand.StatsServiceClient) *Controller {
++	c := newController(cfg, clients)
++	c.mu.Lock()
++	c.healthy = true
++	c.recovering = false
++	c.mu.Unlock()
++	return c
++}
++
++func responseWith(entries ...*statscommand.UserStat) *statscommand.GetUsersStatsResponse {
++	return &statscommand.GetUsersStatsResponse{Users: entries}
++}
++
++func user(email string, ips ...string) *statscommand.UserStat {
++	entries := make([]*statscommand.OnlineIPEntry, 0, len(ips))
++	for _, ip := range ips {
++		entries = append(entries, &statscommand.OnlineIPEntry{Ip: ip})
++	}
++	return &statscommand.UserStat{Email: email, Ips: entries}
++}
++
++func TestAdmissionCapacityIsAtomicAcrossConcurrentRequests(t *testing.T) {
++	c := testController(fixtureConfig())
++	ips := []string{"198.51.100.10", "198.51.100.11", "198.51.100.12"}
++	var wg sync.WaitGroup
++	for _, ip := range ips {
++		for i := 0; i < 80; i++ {
++			wg.Add(1)
++			go func(ip string) {
++				defer wg.Done()
++				c.admit("fixture-a@example.invalid", ip)
++			}(ip)
++		}
++	}
++	wg.Wait()
++
++	c.mu.Lock()
++	defer c.mu.Unlock()
++	count := 0
++	for owner := range c.owners {
++		if owner.email == "fixture-a@example.invalid" {
++			count++
++		}
++	}
++	if count != 2 {
++		t.Fatalf("concurrent admissions created %d owners, want cap 2", count)
++	}
++}
++
++func TestCapacityIsIsolatedPerAccount(t *testing.T) {
++	cfg := fixtureConfig()
++	cfg.Cap = 1
++	c := testController(cfg)
++	if !c.admit("fixture-a@example.invalid", "198.51.100.10") {
++		t.Fatal("first account A IP should be admitted")
++	}
++	if c.admit("fixture-a@example.invalid", "198.51.100.11") {
++		t.Fatal("second account A IP should exceed cap 1")
++	}
++	if !c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("account B must have an independent capacity")
++	}
++	owners := c.status().Owners
++	if len(owners) != 2 || !owners["fixture-a@example.invalid"]["198.51.100.10"] || !owners["fixture-b@example.invalid"]["198.51.100.10"] {
++		t.Fatalf("status owners does not reflect account/IP ownership: %#v", owners)
++	}
++}
++
++func TestCompleteMultiNodeSnapshotPrunesOnlyAbsentOwners(t *testing.T) {
++	cfg := fixtureConfig()
++	first := &fakeStatsClient{get: func() (*statscommand.GetUsersStatsResponse, error) {
++		return responseWith(user("fixture-a@example.invalid", "198.51.100.10")), nil
++	}}
++	second := &fakeStatsClient{get: func() (*statscommand.GetUsersStatsResponse, error) {
++		return responseWith(user("fixture-b@example.invalid", "198.51.100.11")), nil
++	}}
++	c := testController(cfg, first, second)
++	c.owners[grant{"fixture-a@example.invalid", "198.51.100.10"}] = struct{}{}
++	c.owners[grant{"fixture-a@example.invalid", "198.51.100.12"}] = struct{}{}
++	c.owners[grant{"fixture-b@example.invalid", "198.51.100.11"}] = struct{}{}
++	c.pollOnce(context.Background())
++
++	if _, ok := c.owners[grant{"fixture-a@example.invalid", "198.51.100.10"}]; !ok {
++		t.Fatal("owner present on node 1 was pruned")
++	}
++	if _, ok := c.owners[grant{"fixture-b@example.invalid", "198.51.100.11"}]; !ok {
++		t.Fatal("owner present on node 2 was pruned")
++	}
++	if _, ok := c.owners[grant{"fixture-a@example.invalid", "198.51.100.12"}]; ok {
++		t.Fatal("owner absent from the complete two-node snapshot was retained")
++	}
++	if status := c.status(); status.Releases != 1 || !status.Healthy || status.PollOK != 1 {
++		t.Fatalf("unexpected post-reconcile status: %+v", status)
++	}
++}
++
++func TestSnapshotErrorRetainsOwnersAndDeniesAdmissionsUntilRecovery(t *testing.T) {
++	offline := true
++	fake := &fakeStatsClient{get: func() (*statscommand.GetUsersStatsResponse, error) {
++		if offline {
++			return nil, errors.New("fixture API unavailable")
++		}
++		return responseWith(user("fixture-a@example.invalid", "198.51.100.10")), nil
++	}}
++	c := testController(fixtureConfig(), fake)
++	owner := grant{"fixture-a@example.invalid", "198.51.100.10"}
++	c.owners[owner] = struct{}{}
++	c.pollOnce(context.Background())
++	if _, ok := c.owners[owner]; !ok {
++		t.Fatal("snapshot error must retain existing ownership")
++	}
++	if c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("unhealthy controller admitted a new pair")
++	}
++	if status := c.status(); status.Healthy || status.PollErrors != 1 {
++		t.Fatalf("snapshot failure did not mark controller unhealthy: %+v", status)
++	}
++
++	offline = false
++	c.pollOnce(context.Background())
++	if status := c.status(); !status.Healthy || len(status.Owners) != 1 {
++		t.Fatalf("successful snapshot did not restore health and retain observed owner: %+v", status)
++	}
++	if !c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("healthy controller should resume admissions")
++	}
++}
++
++func TestRestartRecoveryWaitsForEmptyScopedSnapshot(t *testing.T) {
++	online := true
++	fake := &fakeStatsClient{get: func() (*statscommand.GetUsersStatsResponse, error) {
++		if online {
++			return responseWith(user("fixture-a@example.invalid", "198.51.100.10")), nil
++		}
++		return responseWith(), nil
++	}}
++	c := newController(fixtureConfig(), []statscommand.StatsServiceClient{fake})
++	if c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("new process must deny while recovering")
++	}
++	c.pollOnce(context.Background())
++	if !c.status().Recovering {
++		t.Fatal("recovery must continue while a scoped account is online")
++	}
++	if c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("recovery state must deny admissions")
++	}
++	online = false
++	c.pollOnce(context.Background())
++	if status := c.status(); status.Recovering || !status.Healthy {
++		t.Fatalf("empty complete snapshot should finish recovery: %+v", status)
++	}
++	if !c.admit("fixture-b@example.invalid", "198.51.100.10") {
++		t.Fatal("admission should work after empty recovery snapshot")
++	}
++}
++
++func TestConfigValidationRejectsUnsafeOrUnscopedValues(t *testing.T) {
++	tests := []struct {
++		name string
++		edit func(*Config)
++	}{
++		{"non-loopback dns", func(c *Config) { c.DNS = "0.0.0.0:5300" }},
++		{"IPv6 loopback spelling", func(c *Config) { c.Admin = "[::1]:8080" }},
++		{"non-loopback API", func(c *Config) { c.APIs[0] = "192.0.2.1:10085" }},
++		{"unscoped email", func(c *Config) { c.Emails[0] = "alice@example.com" }},
++		{"too many accounts", func(c *Config) {
++			for i := 0; i < maxAccounts; i++ {
++				c.Emails = append(c.Emails, fmt.Sprintf("fixture-extra-%d@example.invalid", i))
++			}
++		}},
++		{"too many nodes", func(c *Config) { c.APIs = append(c.APIs, "127.0.0.1:10086", "127.0.0.1:10087") }},
++		{"invalid nonce", func(c *Config) { c.Nonce = "not-hexadecimal!" }},
++	}
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			cfg := fixtureConfig()
++			test.edit(&cfg)
++			if err := validateConfig(cfg); err == nil {
++				t.Fatal("validateConfig accepted invalid config")
++			}
++		})
++	}
++	if err := validateConfig(fixtureConfig()); err != nil {
++		t.Fatalf("valid test fixture rejected: %v", err)
++	}
++}
++
++func TestDecisionNameAcceptsOnlyScopedDocumentationIPs(t *testing.T) {
++	emails := []string{"fixture-a@example.invalid"}
++	for _, ip := range []string{"10", "11", "12"} {
++		name := "u0.p198-51-100-" + ip + ".0123456789abcdef.fixture.invalid."
++		gotEmail, gotIP, ok := parseDecisionName(name, "0123456789abcdef", emails)
++		if !ok || gotEmail != emails[0] || gotIP != "198.51.100."+ip {
++			t.Fatalf("parseDecisionName(%q) = %q, %q, %v", name, gotEmail, gotIP, ok)
++		}
++	}
++	for _, name := range []string{
++		"u1.p198-51-100-10.0123456789abcdef.fixture.invalid.",
++		"u0.p198-51-100-13.0123456789abcdef.fixture.invalid.",
++		"u0.p198-51-100-10.0123456789abcdee.fixture.invalid.",
++		"u00.p198-51-100-10.0123456789abcdef.fixture.invalid.",
++	} {
++		if _, _, ok := parseDecisionName(name, "0123456789abcdef", emails); ok {
++			t.Fatalf("parseDecisionName accepted malformed or unscoped name %q", name)
++		}
++	}
++}
++
++func TestControlPartialUpdatesPreserveUnspecifiedValues(t *testing.T) {
++	c := testController(fixtureConfig())
++	delay := 55
++	if err := c.control(controlRequest{DelayMS: &delay}); err != nil {
++		t.Fatal(err)
++	}
++	paused := true
++	if err := c.control(controlRequest{StatsPaused: &paused}); err != nil {
++		t.Fatal(err)
++	}
++	capValue := 1
++	if err := c.control(controlRequest{Cap: &capValue}); err != nil {
++		t.Fatal(err)
++	}
++	status := c.status()
++	if status.DelayMS != 55 {
++		t.Fatalf("omitted delay_ms was not preserved: %+v", status)
++	}
++	c.mu.Lock()
++	gotCap, gotPaused := c.cap, c.statsPaused
++	c.mu.Unlock()
++	if gotCap != 1 || !gotPaused {
++		t.Fatalf("omitted control fields were not preserved: cap=%d paused=%v", gotCap, gotPaused)
++	}
++	paused = false
++	if err := c.control(controlRequest{StatsPaused: &paused}); err != nil {
++		t.Fatal(err)
++	}
++	if c.status().DelayMS != 55 {
++		t.Fatal("explicit stats_paused update unexpectedly reset delay_ms")
++	}
++}

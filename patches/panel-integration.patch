@@ -1,0 +1,499 @@
+diff --git a/internal/web/job/check_client_ip_job.go b/internal/web/job/check_client_ip_job.go
+--- a/internal/web/job/check_client_ip_job.go
++++ b/internal/web/job/check_client_ip_job.go
+@@ -33,10 +33,11 @@ type IPWithTimestamp struct {
+ // API; no access log is involved. On a core too old to expose that API the job
+ // simply skips the run (the bundled core always supports it).
+ type CheckClientIpJob struct {
+-	bannedSeen  map[string]int64
+-	xrayService service.XrayService
+-	allowlist   ipLimitAllowlist
+-	lastIpPrune int64
++	bannedSeen              map[string]int64
++	xrayService             service.XrayService
++	allowlist               ipLimitAllowlist
++	lastIpPrune             int64
++	nativePolicyErrorLogged bool
+ }
+ 
+ var job *CheckClientIpJob
+@@ -55,6 +56,7 @@ func NewCheckClientIpJob() *CheckClientIpJob {
+ }
+ 
+ func (j *CheckClientIpJob) Run() {
++	managedNativeEmails := j.publishNativeIPLimitPolicy()
+ 	j.pruneStaleIpRows()
+ 	observed, apiMode := j.collectFromOnlineAPI()
+ 	if !apiMode {
+@@ -79,7 +81,7 @@ func (j *CheckClientIpJob) Run() {
+ 	if enforce {
+ 		j.allowlist = j.loadAllowlist()
+ 	}
+-	j.processObserved(observed, enforce, true)
++	j.processObservedWithManagedEmails(observed, enforce, true, managedNativeEmails)
+ }
+ 
+ // resolveEnforce decides whether limits can actually be enforced this run.
+@@ -273,6 +275,10 @@ func (j *CheckClientIpJob) loadClientIpRows(emails []string) map[string]*model.I
+ // transaction, so a scan costs a handful of queries and one fsync instead of
+ // several per observed email.
+ func (j *CheckClientIpJob) processObserved(observed map[string]map[string]int64, enforce, observedAreLive bool) bool {
++	return j.processObservedWithManagedEmails(observed, enforce, observedAreLive, nil)
++}
++
++func (j *CheckClientIpJob) processObservedWithManagedEmails(observed map[string]map[string]int64, enforce, observedAreLive bool, managedEmails map[string]struct{}) bool {
+ 	shouldCleanLog := false
+ 	now := time.Now().Unix()
+ 
+@@ -360,7 +366,11 @@ func (j *CheckClientIpJob) processObserved(observed map[string]map[string]int64,
+ 			continue
+ 		}
+ 
+-		candidates, keptLive := j.updateInboundClientIps(tx, clientIpsRecord, inbound, email, limitByEmail[email], ipsWithTime, enforce, observedAreLive)
++		emailEnforce := enforce
++		if _, managed := managedEmails[email]; managed {
++			emailEnforce = false
++		}
++		candidates, keptLive := j.updateInboundClientIps(tx, clientIpsRecord, inbound, email, limitByEmail[email], ipsWithTime, emailEnforce, observedAreLive)
+ 		bans = append(bans, pendingBan{inbound: inbound, email: email, candidates: candidates, keptLive: keptLive})
+ 	}
+ 
+diff --git a/internal/web/job/native_ip_limit.go b/internal/web/job/native_ip_limit.go
+new file mode 100644
+--- /dev/null
++++ b/internal/web/job/native_ip_limit.go
+@@ -0,0 +1,194 @@
++package job
++
++import (
++	"bytes"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"path/filepath"
++	"strings"
++
++	"github.com/mhsanaei/3x-ui/v3/internal/database"
++	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
++	"github.com/mhsanaei/3x-ui/v3/internal/logger"
++	"gorm.io/gorm"
++)
++
++const (
++	nativeIPLimitEmailsEnv = "XRAY_NATIVE_IP_LIMIT_EMAILS"
++	nativeIPLimitFileEnv   = "XRAY_NATIVE_IP_LIMIT_FILE"
++)
++
++type nativeIPLimitConfig struct {
++	emails []string
++	path   string
++}
++
++type nativeIPLimitPolicy struct {
++	Version int            `json:"version"`
++	Users   map[string]int `json:"users"`
++}
++
++// nativeIPLimitConfigFromEnv leaves the stock path untouched unless both
++// opt-in variables are present. Email spelling is preserved exactly.
++func nativeIPLimitConfigFromEnv() (nativeIPLimitConfig, bool) {
++	rawEmails, emailsSet := os.LookupEnv(nativeIPLimitEmailsEnv)
++	rawPath, pathSet := os.LookupEnv(nativeIPLimitFileEnv)
++	if !emailsSet || !pathSet {
++		return nativeIPLimitConfig{}, false
++	}
++
++	config := nativeIPLimitConfig{emails: parseNativeIPLimitEmails(rawEmails), path: strings.TrimSpace(rawPath)}
++	return config, true
++}
++
++func parseNativeIPLimitEmails(raw string) []string {
++	seen := make(map[string]struct{})
++	emails := make([]string, 0)
++	for _, email := range strings.Split(raw, ",") {
++		email = strings.TrimSpace(email)
++		if email == "" {
++			continue
++		}
++		if _, exists := seen[email]; exists {
++			continue
++		}
++		seen[email] = struct{}{}
++		emails = append(emails, email)
++	}
++	return emails
++}
++
++// publishNativeIPLimitPolicy runs before the online-stats and fail2ban gates.
++// Once environment scope is valid, the emails remain legacy-managed even if
++// publishing fails: the core may still hold its last valid native policy, and
++// re-enabling legacy enforcement could overlap it.
++func (j *CheckClientIpJob) publishNativeIPLimitPolicy() map[string]struct{} {
++	config, configured := nativeIPLimitConfigFromEnv()
++	if !configured {
++		return nil
++	}
++	if len(config.emails) == 0 || config.path == "" {
++		j.logNativeIPLimitPublishError(errors.New("both native IP limit settings must be non-empty"))
++		return nil
++	}
++	managed := nativeIPLimitEmailScope(config.emails)
++
++	policy, err := loadNativeIPLimitPolicy(database.GetDB(), config.emails)
++	if err != nil {
++		j.logNativeIPLimitPublishError(err)
++		return managed
++	}
++	content, err := json.Marshal(policy)
++	if err != nil {
++		j.logNativeIPLimitPublishError(err)
++		return managed
++	}
++	if _, err := writeNativeIPLimitPolicy(config.path, content); err != nil {
++		j.logNativeIPLimitPublishError(err)
++		return managed
++	}
++
++	j.nativePolicyErrorLogged = false
++	return managed
++}
++
++func nativeIPLimitEmailScope(emails []string) map[string]struct{} {
++	managed := make(map[string]struct{}, len(emails))
++	for _, email := range emails {
++		managed[email] = struct{}{}
++	}
++	return managed
++}
++
++func (j *CheckClientIpJob) logNativeIPLimitPublishError(err error) {
++	if j.nativePolicyErrorLogged {
++		return
++	}
++	j.nativePolicyErrorLogged = true
++	logger.Warning("[NativeIPLimit] policy publish failed:", err)
++}
++
++// loadNativeIPLimitPolicy selects only configured indexed emails and copies
++// only their normalized cap and enable state into the native policy.
++func loadNativeIPLimitPolicy(db *gorm.DB, emails []string) (nativeIPLimitPolicy, error) {
++	if db == nil {
++		return nativeIPLimitPolicy{}, errors.New("database is unavailable")
++	}
++	type clientCap struct {
++		Email   string
++		LimitIP int
++		Enable  bool
++	}
++	var rows []clientCap
++	if err := db.Model(&model.ClientRecord{}).
++		Select("email, limit_ip, enable").
++		Where("email IN ?", emails).
++		Scan(&rows).Error; err != nil {
++		return nativeIPLimitPolicy{}, fmt.Errorf("read configured client limits: %w", err)
++	}
++
++	users := make(map[string]int, len(emails))
++	for _, email := range emails {
++		users[email] = 0
++	}
++	for _, row := range rows {
++		_, configured := users[row.Email]
++		if !configured || !row.Enable || row.LimitIP <= 0 {
++			continue
++		}
++		users[row.Email] = row.LimitIP
++	}
++	return nativeIPLimitPolicy{Version: 1, Users: users}, nil
++}
++
++// writeNativeIPLimitPolicy atomically replaces path only when its bytes differ.
++func writeNativeIPLimitPolicy(path string, content []byte) (bool, error) {
++	if strings.TrimSpace(path) == "" {
++		return false, errors.New("native IP limit policy path is empty")
++	}
++	current, err := os.ReadFile(path)
++	if err == nil && bytes.Equal(current, content) {
++		return false, nil
++	}
++	if err != nil && !errors.Is(err, os.ErrNotExist) {
++		return false, fmt.Errorf("read existing policy: %w", err)
++	}
++
++	dir := filepath.Dir(path)
++	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
++	if err != nil {
++		return false, fmt.Errorf("create policy temp file: %w", err)
++	}
++	tmpPath := tmp.Name()
++	closed, renamed := false, false
++	defer func() {
++		if !closed {
++			_ = tmp.Close()
++		}
++		if !renamed {
++			_ = os.Remove(tmpPath)
++		}
++	}()
++
++	if err := tmp.Chmod(0o600); err != nil {
++		return false, fmt.Errorf("set policy temp file mode: %w", err)
++	}
++	if _, err := tmp.Write(content); err != nil {
++		return false, fmt.Errorf("write policy temp file: %w", err)
++	}
++	if err := tmp.Sync(); err != nil {
++		return false, fmt.Errorf("sync policy temp file: %w", err)
++	}
++	if err := tmp.Close(); err != nil {
++		closed = true
++		return false, fmt.Errorf("close policy temp file: %w", err)
++	}
++	closed = true
++	if err := os.Rename(tmpPath, path); err != nil {
++		return false, fmt.Errorf("replace policy file: %w", err)
++	}
++	renamed = true
++	return true, nil
++}
+diff --git a/internal/web/job/native_ip_limit_test.go b/internal/web/job/native_ip_limit_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/web/job/native_ip_limit_test.go
+@@ -0,0 +1,188 @@
++package job
++
++import (
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"reflect"
++	"runtime"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/mhsanaei/3x-ui/v3/internal/database"
++	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
++)
++
++func TestPublishNativeIPLimitPolicyRequiresBothSettings(t *testing.T) {
++	t.Setenv(nativeIPLimitEmailsEnv, "alice")
++	previousPath, pathWasSet := os.LookupEnv(nativeIPLimitFileEnv)
++	if err := os.Unsetenv(nativeIPLimitFileEnv); err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() {
++		if pathWasSet {
++			_ = os.Setenv(nativeIPLimitFileEnv, previousPath)
++		} else {
++			_ = os.Unsetenv(nativeIPLimitFileEnv)
++		}
++	})
++
++	if _, configured := nativeIPLimitConfigFromEnv(); configured {
++		t.Fatal("missing policy path must leave the native publisher disabled")
++	}
++	if managed := (&CheckClientIpJob{}).publishNativeIPLimitPolicy(); managed != nil {
++		t.Fatalf("publisher must leave the stock path active without both settings, got managed scope %v", managed)
++	}
++}
++
++func TestPublishNativeIPLimitPolicyUsesOnlyExactConfiguredRecords(t *testing.T) {
++	setupIntegrationDB(t)
++	policyDir := filepath.Join(t.TempDir(), "native")
++	if err := os.Mkdir(policyDir, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	policyPath := filepath.Join(policyDir, "policy.json")
++	t.Setenv(nativeIPLimitEmailsEnv, "alice, Alice, unlimited, disabled, missing")
++	t.Setenv(nativeIPLimitFileEnv, policyPath)
++
++	records := []model.ClientRecord{
++		{Email: "alice", LimitIP: 2, Enable: true, UUID: "uuid-secret", Password: "password-secret"},
++		{Email: "unlimited", LimitIP: 0, Enable: true},
++		{Email: "disabled", LimitIP: 8, Enable: false},
++		{Email: "other", LimitIP: 99, Enable: true, UUID: "other-secret"},
++	}
++	if err := database.GetDB().Create(&records).Error; err != nil {
++		t.Fatalf("seed client records: %v", err)
++	}
++	if err := database.GetDB().Model(&model.ClientRecord{}).Where("email = ?", "disabled").Update("enable", false).Error; err != nil {
++		t.Fatalf("disable client record: %v", err)
++	}
++
++	managed := (&CheckClientIpJob{}).publishNativeIPLimitPolicy()
++	wantManaged := map[string]struct{}{
++		"alice": {}, "Alice": {}, "unlimited": {}, "disabled": {}, "missing": {},
++	}
++	if !reflect.DeepEqual(managed, wantManaged) {
++		t.Fatalf("managed scope mismatch\ngot:  %v\nwant: %v", managed, wantManaged)
++	}
++
++	content, err := os.ReadFile(policyPath)
++	if err != nil {
++		t.Fatalf("read published policy: %v", err)
++	}
++	var policy nativeIPLimitPolicy
++	if err := json.Unmarshal(content, &policy); err != nil {
++		t.Fatalf("unmarshal published policy: %v", err)
++	}
++	wantUsers := map[string]int{"alice": 2, "Alice": 0, "unlimited": 0, "disabled": 0, "missing": 0}
++	if policy.Version != 1 || !reflect.DeepEqual(policy.Users, wantUsers) {
++		t.Fatalf("unexpected policy: version=%d users=%v", policy.Version, policy.Users)
++	}
++	for _, secret := range []string{"other", "uuid-secret", "password-secret", "other-secret"} {
++		if strings.Contains(string(content), secret) {
++			t.Fatalf("policy leaked unconfigured or credential data %q: %s", secret, content)
++		}
++	}
++	if runtime.GOOS != "windows" {
++		info, err := os.Stat(policyPath)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if got := info.Mode().Perm(); got != 0o600 {
++			t.Fatalf("policy mode = %04o, want 0600", got)
++		}
++	}
++}
++
++func TestWriteNativeIPLimitPolicyAtomicAndSkipsUnchangedContent(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "policy.json")
++	first := []byte(`{"version":1,"users":{"alice":1}}`)
++	changed, err := writeNativeIPLimitPolicy(path, first)
++	if err != nil || !changed {
++		t.Fatalf("initial write changed=%v err=%v", changed, err)
++	}
++	firstInfo, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	changed, err = writeNativeIPLimitPolicy(path, first)
++	if err != nil || changed {
++		t.Fatalf("unchanged write changed=%v err=%v, want no rewrite", changed, err)
++	}
++	secondInfo, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !os.SameFile(firstInfo, secondInfo) {
++		t.Fatal("unchanged policy was rewritten")
++	}
++
++	second := []byte(`{"version":1,"users":{"alice":2}}`)
++	changed, err = writeNativeIPLimitPolicy(path, second)
++	if err != nil || !changed {
++		t.Fatalf("changed content write changed=%v err=%v", changed, err)
++	}
++	got, err := os.ReadFile(path)
++	if err != nil || string(got) != string(second) {
++		t.Fatalf("replacement content = %q, err=%v", got, err)
++	}
++}
++
++func TestProcessObservedManagedNativeEmailCollectsWithoutLegacyEnforcement(t *testing.T) {
++	setupIntegrationDB(t)
++
++	const email = "alice"
++	seedLinkedInboundWithClient(t, "native-managed-inbound", email, 1)
++	seedClientIps(t, email, []IPWithTimestamp{{IP: "192.0.2.10", Timestamp: time.Now().Unix()}})
++
++	observed := map[string]map[string]int64{
++		email: {
++			"192.0.2.10":    time.Now().Unix(),
++			"198.51.100.20": time.Now().Unix(),
++		},
++	}
++	(&CheckClientIpJob{}).processObservedWithManagedEmails(observed, true, true, map[string]struct{}{email: {}})
++
++	got := ipSet(readClientIps(t, email))
++	if len(got) != 2 {
++		t.Fatalf("managed email should retain both observed IPs for panel display, got %v", got)
++	}
++	if info, err := os.Stat(readIpLimitLogPath()); err == nil && info.Size() > 0 {
++		body, _ := os.ReadFile(readIpLimitLogPath())
++		t.Fatalf("managed email must not queue legacy bans or temporary removals, got:\n%s", body)
++	}
++}
++
++func TestNativePolicyWriteFailureKeepsEmailOutOfLegacyEnforcement(t *testing.T) {
++	setupIntegrationDB(t)
++
++	const email = "alice"
++	seedLinkedInboundWithClient(t, "native-managed-write-failure", email, 1)
++	seedClientIps(t, email, []IPWithTimestamp{{IP: "192.0.2.30", Timestamp: time.Now().Unix()}})
++	t.Setenv(nativeIPLimitEmailsEnv, email)
++	t.Setenv(nativeIPLimitFileEnv, filepath.Join(t.TempDir(), "missing", "policy.json"))
++
++	job := &CheckClientIpJob{}
++	managed := job.publishNativeIPLimitPolicy()
++	if _, ok := managed[email]; !ok || len(managed) != 1 {
++		t.Fatalf("failed publication must preserve the configured managed scope, got %v", managed)
++	}
++
++	observed := map[string]map[string]int64{
++		email: {
++			"192.0.2.30":    time.Now().Unix(),
++			"198.51.100.30": time.Now().Unix(),
++		},
++	}
++	job.processObservedWithManagedEmails(observed, true, true, managed)
++
++	if got := ipSet(readClientIps(t, email)); len(got) != 2 {
++		t.Fatalf("failed publication must still preserve both displayed IPs, got %v", got)
++	}
++	if info, err := os.Stat(readIpLimitLogPath()); err == nil && info.Size() > 0 {
++		body, _ := os.ReadFile(readIpLimitLogPath())
++		t.Fatalf("failed publication must not re-enable legacy bans or temporary removals, got:\n%s", body)
++	}
++}
+diff --git a/internal/web/job/validation_pass2_sync_test.go b/internal/web/job/validation_pass2_sync_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/web/job/validation_pass2_sync_test.go
+@@ -0,0 +1,42 @@
++package job
++
++import (
++	"testing"
++	"time"
++
++	"github.com/mhsanaei/3x-ui/v3/internal/database"
++)
++
++// Deterministic reproduction of the legacy union's freshness boundary. The
++// remote IP is stipulated to belong to an ongoing flow whose LastSeen remains
++// its admission timestamp, as the core stores it. This does not assert that a
++// particular deployment flow has this shape.
++func TestValidationLegacyRemoteFreshnessBoundary(t *testing.T) {
++	for _, remoteAge := range []time.Duration{30 * time.Second, 121 * time.Second} {
++		t.Run(remoteAge.String(), func(t *testing.T) {
++			setupIntegrationDB(t)
++			const email = "fixture-global"
++			now := time.Now().Unix()
++			inbound := seedLinkedInboundWithClient(t, "fixture-global", email, 1)
++			row := seedClientIps(t, email, []IPWithTimestamp{{IP: "198.51.100.20", Timestamp: now - int64(remoteAge/time.Second)}})
++			candidates, kept := (&CheckClientIpJob{}).updateInboundClientIps(database.GetDB(), row, inbound, email, 1,
++				[]IPWithTimestamp{{IP: "192.0.2.10", Timestamp: now}}, true, true)
++			wantCandidates := 1
++			if remoteAge > 120*time.Second {
++				wantCandidates = 0
++			}
++			if len(candidates) != wantCandidates || kept != 1 {
++				t.Fatalf("remoteAge=%s candidates=%d kept=%d, want candidates=%d kept=1", remoteAge, len(candidates), kept, wantCandidates)
++			}
++			t.Logf("remoteAge=%s, excess-IP candidates=%d; no ban publication or external command invoked", remoteAge, len(candidates))
++		})
++	}
++}
++
++func TestValidationPanelScopeDropsTrailingComma(t *testing.T) {
++	got := parseNativeIPLimitEmails("alice,")
++	if len(got) != 1 || got[0] != "alice" {
++		t.Fatalf("panel parser behavior changed: %v", got)
++	}
++	t.Log("CONFIRMED MISMATCH: panel accepts trailing comma that disables core native setup; no active settings changed")
++}

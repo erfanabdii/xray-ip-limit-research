@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "prepared_date": "2026-10-16",
+  "status": "research_review_snapshot_not_a_deployment_release",
+  "repository": "erfanabdii/xray-ip-limit-research",
+  "manifest_excludes_itself": true,
+  "publication_edits": [
+    "Added a Persian reading guide and README link.",
+    "Filled the unposted discussion draft with the intended research repository link.",
+    "Replaced preparation-only publication status with snapshot scope."
+  ],
+  "files": [
+    {
+      "file": "docs/BENCHMARKS.md",
+      "bytes": 6254,
+      "sha256": "4913bf9a1a760417a65bdc1b1f146cc0f08f89756a349995cc30855993971674"
+    },
+    {
+      "file": "docs/CLAIMS.json",
+      "bytes": 13647,
+      "sha256": "21def2f75a74e170add24d5e767ba58889ec77dad15e2aa9b3e8e30b082fc000"
+    },
+    {
+      "file": "docs/FINDINGS.md",
+      "bytes": 13874,
+      "sha256": "b57718e77bafbdda669a36c70bad7aaf9b68a62d0c0e667b2c6263adc6e832b9"
+    },
+    {
+      "file": "docs/MAINTAINER-DRAFT.md",
+      "bytes": 2098,
+      "sha256": "1ff207b259ed3cb7a84559389c35f7b7b485383779d87662cca600d1e5c066d2"
+    },
+    {
+      "file": "docs/REPRODUCING.md",
+      "bytes": 4667,
+      "sha256": "738423fc4735eb12917e0e4145a6fd1b443fea86762aa77de232de6a0a46b5c1"
+    },
+    {
+      "file": "docs/SOURCES.md",
+      "bytes": 8488,
+      "sha256": "f7cbbdca5c1ce2ea03d0e37d53b25e2e306bb97598526b72bd92cfb3d6e98435"
+    },
+    {
+      "file": "examples/controller-routing.lua",
+      "bytes": 1190,
+      "sha256": "190af9973121984ddc2f7694dd00eced0acc3955250d660fbeee2c3b38a00e2f"
+    },
+    {
+      "file": "examples/controller.example.json",
+      "bytes": 266,
+      "sha256": "4f1146de7cbfb3bfef5392e4a91cf9f4496af4c49a3b101a1f005a1a3183a132"
+    },
+    {
+      "file": "examples/native-policy.example.json",
+      "bytes": 66,
+      "sha256": "ae11044c4c39e51a4a9fb21bb04817dc8f7b5ce95c8dbd949448e4c67bef8473"
+    },
+    {
+      "file": "licenses/3x-ui-GPL-3.0.txt",
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "file": "licenses/Xray-core-MPL-2.0.txt",
+      "bytes": 17098,
+      "sha256": "2684de17300e0a434686f1ec7f8af6045207a4b457a3fe04b2b9ce655e7c5d50"
+    },
+    {
+      "file": "measurements/cpu-samples.json",
+      "bytes": 38066,
+      "sha256": "b62f2b461ca2b4a4e5cfe7787be1fd6d63ec41eaf07b3eba7fc66b6417c89519"
+    },
+    {
+      "file": "measurements/edge-observations.json",
+      "bytes": 2630,
+      "sha256": "018b58d60018e88c5f5a21b2bbd73134f56787fa5f702011c1d9ea20979656e6"
+    },
+    {
+      "file": "measurements/functional.json",
+      "bytes": 1014,
+      "sha256": "979828f6389b3d226f749c758d3ae64c550bd3948860f616ba7f6fffab326dfb"
+    },
+    {
+      "file": "measurements/release-timing.json",
+      "bytes": 4464,
+      "sha256": "454138e75b1b184f0206b1c0be7d663120884f27b488f2421075bd98f2ef34f1"
+    },
+    {
+      "file": "NOTICE.md",
+      "bytes": 1517,
+      "sha256": "3802580e23a40e22db4223aeae5e4f72f6cb3a8587cecd40f9e4b291074f3f50"
+    },
+    {
+      "file": "patches/panel-integration.patch",
+      "bytes": 17327,
+      "sha256": "23b788e22e3bcb44d749a36dc3ecb5868aa240e39c05e467e4ae11f38686b37d"
+    },
+    {
+      "file": "patches/xray-lua-research.patch",
+      "bytes": 43680,
+      "sha256": "518f2077a271631228bf8903e7670530e26d167061a22ea76c947ef51684e319"
+    },
+    {
+      "file": "patches/xray-native.patch",
+      "bytes": 42552,
+      "sha256": "7ebd1576069109444fc05e4185b635c64cc86c646db7c9b990119e1397204d65"
+    },
+    {
+      "file": "README.fa.md",
+      "bytes": 3372,
+      "sha256": "ab5c3029496df84c413d55dc87bf7743659d8f9efc078feda8f8fcbdbe735a80"
+    },
+    {
+      "file": "README.md",
+      "bytes": 3034,
+      "sha256": "db2f30236820cd850af13d0e9582cb37d906803e1674f2dc51453584195eb6f5"
+    },
+    {
+      "file": "scripts/coordination_model.py",
+      "bytes": 5571,
+      "sha256": "2f1237b193685a46353e1a748ed03ae5b02852ab86df40d8cfd7fadd06e388a0"
+    },
+    {
+      "file": "scripts/summarize.py",
+      "bytes": 3325,
+      "sha256": "5ab9dc4ab2725f9112925afb33267fb7243d2040c21242da31ef8b015f1ebc44"
+    }
+  ]
+}

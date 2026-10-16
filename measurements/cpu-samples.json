@@ -1,0 +1,1047 @@
+{
+  "index_policy": "run_index and round_index are synthetic 1-based ordinals assigned within each mode in saved sample order; raw host/run identifiers are omitted.",
+  "schema_version": 1,
+  "studies": [
+    {
+      "accounting_resolution_seconds": 0.01,
+      "cgroup_cpu_quota_cores": 0.2,
+      "id": "P2_matched_flags",
+      "measurement_scope": "Server-child lifetime CPU from startup through measured work and shutdown, using user plus system CPU; client and target processes are outside this metric. Test-only loopback workload with no remote targets.",
+      "modes": [
+        "stock",
+        "candidate_off",
+        "candidate_on"
+      ],
+      "repeat_count_per_mode": 3,
+      "samples": [
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "stock",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 146.596,
+          "server_system_cpu_ms": 56.09,
+          "server_user_cpu_ms": 90.506
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "stock",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 147.214,
+          "server_system_cpu_ms": 57.132,
+          "server_user_cpu_ms": 90.082
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "stock",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 143.502,
+          "server_system_cpu_ms": 59.686,
+          "server_user_cpu_ms": 83.816
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "candidate_off",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 151.653,
+          "server_system_cpu_ms": 67.193,
+          "server_user_cpu_ms": 84.46
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "candidate_off",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 146.753,
+          "server_system_cpu_ms": 54.295,
+          "server_user_cpu_ms": 92.458
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "candidate_off",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 144.314,
+          "server_system_cpu_ms": 47.751,
+          "server_user_cpu_ms": 96.563
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "candidate_on",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 146.066,
+          "server_system_cpu_ms": 61.32,
+          "server_user_cpu_ms": 84.746
+        },
+        {
+          "cgroup_throttle_events": 1,
+          "cgroup_throttled_usec": 62772,
+          "mode": "candidate_on",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 153.064,
+          "server_system_cpu_ms": 59.866,
+          "server_user_cpu_ms": 93.198
+        },
+        {
+          "cgroup_throttle_events": 0,
+          "cgroup_throttled_usec": 0,
+          "mode": "candidate_on",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 151.996,
+          "server_system_cpu_ms": 66.891,
+          "server_user_cpu_ms": 85.105
+        }
+      ],
+      "throttling_limit": "The measured cgroup was quota-limited to 0.2 CPU cores. One candidate_on sustained-transfer throttle event occurred (62,772 us); counters are cgroup-level, not process-attributed CPU.",
+      "workload": {
+        "cooldown_seconds": 2.0,
+        "idle_seconds": 2.0,
+        "request_body_bytes_each": 65536,
+        "requests_per_mode": 40,
+        "requests_per_second": 5.0,
+        "sustained_response_bytes": 4194304,
+        "sustained_target_max_bytes_per_second": 1048576,
+        "warmup_requests_excluded": true
+      }
+    },
+    {
+      "cgroup_cpu_quota_cores": 0.2,
+      "id": "P3_precise_allowed_phases",
+      "lifetime_accounting": "RUSAGE_CHILDREN delta around reaping only this case server while its client and echo target remained alive.",
+      "measurement_scope": "Precise server-process CPU for the two allowed traffic phases only. Client and echo-target CPU are excluded. Server lifetime CPU is a separate metric including startup, phases, and shutdown.",
+      "modes": [
+        "stock",
+        "candidate_off",
+        "candidate_on"
+      ],
+      "phase_cpu_source": "Per-process total CPU nanoseconds converted to ms; user and system components are included.",
+      "repeat_count_per_mode": 3,
+      "samples": [
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 42.246398
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 42.374425
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 84.620823,
+          "cgroup_throttle_events": 3,
+          "cgroup_throttled_usec": 180081,
+          "mode": "stock",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 117.48,
+          "server_lifetime_system_cpu_ms": 42.408,
+          "server_lifetime_user_cpu_ms": 75.072
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 41.65768
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 43.41923
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 85.07691,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 105695,
+          "mode": "stock",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 117.13,
+          "server_lifetime_system_cpu_ms": 48.77,
+          "server_lifetime_user_cpu_ms": 68.36
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 46.47263
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 44.725937
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 91.198567,
+          "cgroup_throttle_events": 4,
+          "cgroup_throttled_usec": 199134,
+          "mode": "stock",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 124.3,
+          "server_lifetime_system_cpu_ms": 46.267,
+          "server_lifetime_user_cpu_ms": 78.033
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 45.455862
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 51.693601
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 97.149463,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 116033,
+          "mode": "candidate_off",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 125.767,
+          "server_lifetime_system_cpu_ms": 40.543,
+          "server_lifetime_user_cpu_ms": 85.224
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 46.316849
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 48.779493
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 95.096342,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 109474,
+          "mode": "candidate_off",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 123.928,
+          "server_lifetime_system_cpu_ms": 43.048,
+          "server_lifetime_user_cpu_ms": 80.88
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 47.036334
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 45.175476
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 92.21181,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 118732,
+          "mode": "candidate_off",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 121.989,
+          "server_lifetime_system_cpu_ms": 43.647,
+          "server_lifetime_user_cpu_ms": 78.342
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 47.382284
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 49.982797
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 97.365081,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 116128,
+          "mode": "candidate_on",
+          "round_index": 1,
+          "run_index": 1,
+          "server_lifetime_cpu_ms": 127.24,
+          "server_lifetime_system_cpu_ms": 42.949,
+          "server_lifetime_user_cpu_ms": 84.291
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 57.210264
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 52.827273
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 110.037537,
+          "cgroup_throttle_events": 3,
+          "cgroup_throttled_usec": 194596,
+          "mode": "candidate_on",
+          "round_index": 2,
+          "run_index": 2,
+          "server_lifetime_cpu_ms": 145.093,
+          "server_lifetime_system_cpu_ms": 52.835,
+          "server_lifetime_user_cpu_ms": 92.258
+        },
+        {
+          "allowed_phase_server_cpu": [
+            {
+              "phase": "first_allowed_ip_hold",
+              "server_cpu_ms": 46.275655
+            },
+            {
+              "phase": "additional_allowed_ip_hold",
+              "server_cpu_ms": 51.458017
+            }
+          ],
+          "allowed_phase_server_cpu_ms": 97.733672,
+          "cgroup_throttle_events": 2,
+          "cgroup_throttled_usec": 105569,
+          "mode": "candidate_on",
+          "round_index": 3,
+          "run_index": 3,
+          "server_lifetime_cpu_ms": 129.05,
+          "server_lifetime_system_cpu_ms": 48.521,
+          "server_lifetime_user_cpu_ms": 80.529
+        }
+      ],
+      "throttling_limit": "The measured cgroup was quota-limited to 0.2 CPU cores. Per-run throttle counters are case-wide cgroup deltas and are not attributed to the server process. This allowed-only follow-up did not exercise rejection traffic.",
+      "workload": {
+        "additional_held_flows": 16,
+        "echo_payload_bytes": 8192,
+        "initial_held_flows": 16,
+        "roundtrips_per_held_flow_per_phase": 64,
+        "roundtrips_per_second": 16,
+        "total_held_flows": 32
+      }
+    },
+    {
+      "hwm_caveat": "VmHWM sums across processes can include shared pages and are not unique physical-memory use.",
+      "id": "P5_four_mode_allowed_phases",
+      "measurement_scope": "For each of five matched allowed phases, sum proxy core/server CPU plus controller CPU when present. Client and target CPU are excluded. Startup, denials, and cleanup are excluded. Per-run HWM is the core/server plus controller sum.",
+      "modes": [
+        "stock",
+        "lua_simple",
+        "native",
+        "lua_controller"
+      ],
+      "phase_cpu_source": "Per-process total CPU nanoseconds converted to ms; user and system CPU are included.",
+      "repeat_count_per_mode": 3,
+      "samples": [
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 80549,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 10.041376,
+              "core_plus_controller_cpu_ms": 10.041376,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.667902,
+              "core_plus_controller_cpu_ms": 8.667902,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 3293,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 36.653095,
+              "core_plus_controller_cpu_ms": 36.653095,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 37.470501,
+              "core_plus_controller_cpu_ms": 37.470501,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 6.269905,
+              "core_plus_controller_cpu_ms": 6.269905,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.503906,
+          "core_plus_controller_hwm_sum_mib": 39.503906,
+          "mode": "stock",
+          "round_index": 1,
+          "run_index": 1,
+          "sum_allowed_phase_cpu_ms": 99.102779
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 5011,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.866655,
+              "core_plus_controller_cpu_ms": 8.866655,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.718278,
+              "core_plus_controller_cpu_ms": 8.718278,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 9290,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 34.402978,
+              "core_plus_controller_cpu_ms": 34.402978,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 8820,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 35.299783,
+              "core_plus_controller_cpu_ms": 35.299783,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 6.109544,
+              "core_plus_controller_cpu_ms": 6.109544,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.519531,
+          "core_plus_controller_hwm_sum_mib": 39.519531,
+          "mode": "stock",
+          "round_index": 2,
+          "run_index": 2,
+          "sum_allowed_phase_cpu_ms": 93.397238
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 13497,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 9.582177,
+              "core_plus_controller_cpu_ms": 9.582177,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.066104,
+              "core_plus_controller_cpu_ms": 8.066104,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 36.906881,
+              "core_plus_controller_cpu_ms": 36.906881,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 40.942182,
+              "core_plus_controller_cpu_ms": 40.942182,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 5.343794,
+              "core_plus_controller_cpu_ms": 5.343794,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.34375,
+          "core_plus_controller_hwm_sum_mib": 39.34375,
+          "mode": "stock",
+          "round_index": 3,
+          "run_index": 3,
+          "sum_allowed_phase_cpu_ms": 100.841138
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.377125,
+              "core_plus_controller_cpu_ms": 8.377125,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.953381,
+              "core_plus_controller_cpu_ms": 8.953381,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 16198,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 34.57274,
+              "core_plus_controller_cpu_ms": 34.57274,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 23176,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 39.444388,
+              "core_plus_controller_cpu_ms": 39.444388,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 5.732697,
+              "core_plus_controller_cpu_ms": 5.732697,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.894531,
+          "core_plus_controller_hwm_sum_mib": 39.894531,
+          "mode": "lua_simple",
+          "round_index": 1,
+          "run_index": 1,
+          "sum_allowed_phase_cpu_ms": 97.080331
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 29111,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 9.215183,
+              "core_plus_controller_cpu_ms": 9.215183,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.608863,
+              "core_plus_controller_cpu_ms": 8.608863,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 33.987322,
+              "core_plus_controller_cpu_ms": 33.987322,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 2267,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 41.437288,
+              "core_plus_controller_cpu_ms": 41.437288,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 7.890115,
+              "core_plus_controller_cpu_ms": 7.890115,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.578125,
+          "core_plus_controller_hwm_sum_mib": 39.578125,
+          "mode": "lua_simple",
+          "round_index": 2,
+          "run_index": 2,
+          "sum_allowed_phase_cpu_ms": 101.138771
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 55315,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.861391,
+              "core_plus_controller_cpu_ms": 8.861391,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 8.284906,
+              "core_plus_controller_cpu_ms": 8.284906,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 47095,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 35.727913,
+              "core_plus_controller_cpu_ms": 35.727913,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 37.2169,
+              "core_plus_controller_cpu_ms": 37.2169,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 5.472261,
+              "core_plus_controller_cpu_ms": 5.472261,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 39.601562,
+          "core_plus_controller_hwm_sum_mib": 39.601562,
+          "mode": "lua_simple",
+          "round_index": 3,
+          "run_index": 3,
+          "sum_allowed_phase_cpu_ms": 95.563371
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 4688,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 10.169758,
+              "core_plus_controller_cpu_ms": 10.169758,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 10.035286,
+              "core_plus_controller_cpu_ms": 10.035286,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 4095,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 38.360427,
+              "core_plus_controller_cpu_ms": 38.360427,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 40.867029,
+              "core_plus_controller_cpu_ms": 40.867029,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 35582,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 6.695067,
+              "core_plus_controller_cpu_ms": 6.695067,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 40.140625,
+          "core_plus_controller_hwm_sum_mib": 40.140625,
+          "mode": "native",
+          "round_index": 1,
+          "run_index": 1,
+          "sum_allowed_phase_cpu_ms": 106.127567
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 79088,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 11.145917,
+              "core_plus_controller_cpu_ms": 11.145917,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 9.733098,
+              "core_plus_controller_cpu_ms": 9.733098,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 19640,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 33.813011,
+              "core_plus_controller_cpu_ms": 33.813011,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 40.500452,
+              "core_plus_controller_cpu_ms": 40.500452,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 7.106014,
+              "core_plus_controller_cpu_ms": 7.106014,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 40.386719,
+          "core_plus_controller_hwm_sum_mib": 40.386719,
+          "mode": "native",
+          "round_index": 2,
+          "run_index": 2,
+          "sum_allowed_phase_cpu_ms": 102.298492
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 55529,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 9.253055,
+              "core_plus_controller_cpu_ms": 9.253055,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 9.368587,
+              "core_plus_controller_cpu_ms": 9.368587,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 47175,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 37.492012,
+              "core_plus_controller_cpu_ms": 37.492012,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 3709,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 38.320511,
+              "core_plus_controller_cpu_ms": 38.320511,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 0.0,
+              "controller_sampled": false,
+              "core_cpu_ms": 6.489489,
+              "core_plus_controller_cpu_ms": 6.489489,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 0.0,
+          "core_hwm_mib": 40.167969,
+          "core_plus_controller_hwm_sum_mib": 40.167969,
+          "mode": "native",
+          "round_index": 3,
+          "run_index": 3,
+          "sum_allowed_phase_cpu_ms": 100.923654
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 2,
+              "cgroup_throttled_usec": 82417,
+              "controller_cpu_ms": 3.331915,
+              "controller_sampled": true,
+              "core_cpu_ms": 14.165192,
+              "core_plus_controller_cpu_ms": 17.497107,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 2.533334,
+              "controller_sampled": true,
+              "core_cpu_ms": 15.715561,
+              "core_plus_controller_cpu_ms": 18.248895,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 1486,
+              "controller_cpu_ms": 10.994249,
+              "controller_sampled": true,
+              "core_cpu_ms": 46.071181,
+              "core_plus_controller_cpu_ms": 57.06543,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 2,
+              "cgroup_throttled_usec": 7843,
+              "controller_cpu_ms": 10.432336,
+              "controller_sampled": true,
+              "core_cpu_ms": 50.374047,
+              "core_plus_controller_cpu_ms": 60.806383,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 5.662988,
+              "controller_sampled": true,
+              "core_cpu_ms": 4.043081,
+              "core_plus_controller_cpu_ms": 9.706069,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 16.714844,
+          "core_hwm_mib": 41.675781,
+          "core_plus_controller_hwm_sum_mib": 58.390625,
+          "mode": "lua_controller",
+          "round_index": 1,
+          "run_index": 1,
+          "sum_allowed_phase_cpu_ms": 163.323884
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 6602,
+              "controller_cpu_ms": 2.935637,
+              "controller_sampled": true,
+              "core_cpu_ms": 12.679008,
+              "core_plus_controller_cpu_ms": 15.614645,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 2.812282,
+              "controller_sampled": true,
+              "core_cpu_ms": 16.012833,
+              "core_plus_controller_cpu_ms": 18.825115,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 10.512715,
+              "controller_sampled": true,
+              "core_cpu_ms": 42.207951,
+              "core_plus_controller_cpu_ms": 52.720666,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 27881,
+              "controller_cpu_ms": 10.916638,
+              "controller_sampled": true,
+              "core_cpu_ms": 49.844527,
+              "core_plus_controller_cpu_ms": 60.761165,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 5.396189,
+              "controller_sampled": true,
+              "core_cpu_ms": 4.044029,
+              "core_plus_controller_cpu_ms": 9.440218,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 16.695312,
+          "core_hwm_mib": 41.441406,
+          "core_plus_controller_hwm_sum_mib": 58.136719,
+          "mode": "lua_controller",
+          "round_index": 2,
+          "run_index": 2,
+          "sum_allowed_phase_cpu_ms": 157.361809
+        },
+        {
+          "allowed_phase_cpu": [
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 5979,
+              "controller_cpu_ms": 2.419968,
+              "controller_sampled": true,
+              "core_cpu_ms": 11.069656,
+              "core_plus_controller_cpu_ms": 13.489624,
+              "phase": "first_ip_cold"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 3.005993,
+              "controller_sampled": true,
+              "core_cpu_ms": 15.321057,
+              "core_plus_controller_cpu_ms": 18.32705,
+              "phase": "second_ip_warm"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 9352,
+              "controller_cpu_ms": 10.602786,
+              "controller_sampled": true,
+              "core_cpu_ms": 38.031515,
+              "core_plus_controller_cpu_ms": 48.634301,
+              "phase": "held_transfer"
+            },
+            {
+              "cgroup_throttle_events": 1,
+              "cgroup_throttled_usec": 4182,
+              "controller_cpu_ms": 11.774448,
+              "controller_sampled": true,
+              "core_cpu_ms": 55.043194,
+              "core_plus_controller_cpu_ms": 66.817642,
+              "phase": "short_connections"
+            },
+            {
+              "cgroup_throttle_events": 0,
+              "cgroup_throttled_usec": 0,
+              "controller_cpu_ms": 5.774341,
+              "controller_sampled": true,
+              "core_cpu_ms": 4.124421,
+              "core_plus_controller_cpu_ms": 9.898762,
+              "phase": "idle_active"
+            }
+          ],
+          "controller_hwm_mib": 16.691406,
+          "core_hwm_mib": 41.597656,
+          "core_plus_controller_hwm_sum_mib": 58.289062,
+          "mode": "lua_controller",
+          "round_index": 3,
+          "run_index": 3,
+          "sum_allowed_phase_cpu_ms": 157.167379
+        }
+      ],
+      "throttle_events_by_mode": {
+        "lua_controller": 10,
+        "lua_simple": 6,
+        "native": 8,
+        "stock": 6
+      },
+      "throttled_usec_by_mode": {
+        "lua_controller": 145742,
+        "lua_simple": 173162,
+        "native": 249506,
+        "stock": 120460
+      },
+      "throttling_limit": "Cgroup throttle events and time are retained per phase, but are cgroup-wide and not attributed to a specific process. Hardware quota details are not claimed here.",
+      "workload": {
+        "accounts": 8,
+        "allowed_connection_starts_per_sample": 48,
+        "echo_payload_bytes_each_direction": 1048576,
+        "held_flows": 16,
+        "idle_active_seconds": 1,
+        "rotated_rounds": 3
+      }
+    }
+  ],
+  "units": {
+    "cpu": "milliseconds (ms)",
+    "high_water_memory": "mebibytes (MiB)",
+    "throttle_time": "microseconds (us)"
+  }
+}

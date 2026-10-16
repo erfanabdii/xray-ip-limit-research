@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "users": {
+    "alice": 2,
+    "bob": 1
+  }
+}

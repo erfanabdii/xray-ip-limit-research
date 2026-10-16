@@ -1,0 +1,9 @@
+{
+  "dns": "127.0.0.1:15453",
+  "admin": "127.0.0.1:15454",
+  "apis": ["127.0.0.1:16279", "127.0.0.1:16280"],
+  "nonce": "00000000000000000000000000000000",
+  "emails": ["fixture-alice@example.invalid", "fixture-bob@example.invalid"],
+  "cap": 2,
+  "poll_ms": 100
+}

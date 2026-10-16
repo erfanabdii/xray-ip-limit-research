@@ -1,0 +1,93 @@
+{
+  "aggregation_unit": "Per address, taking the union of observations across the measured modes.",
+  "evidence_class": "Saved direct-HTTPS probe measurements; network labels and VPN/TUN state were user-reported, not independently recorded by the tool.",
+  "latest_complete_scan": {
+    "address_count": 65,
+    "address_mode_groups": 130,
+    "address_outcomes": {
+      "multiple_observed_egresses": 0,
+      "no_observed_egress_unknown": 13,
+      "one_observed_egress": 52
+    },
+    "attempt_count": 650,
+    "attempts_per_address_mode_max": 5,
+    "attempts_per_address_mode_min": 5,
+    "mode_count": 2
+  },
+  "network_identity_verification": "not performed",
+  "schema_version": 1,
+  "legacy_complete_scans": [
+    {
+      "run_index": 1,
+      "address_count": 21,
+      "attempt_count": 210,
+      "address_mode_groups": 42,
+      "address_outcomes": {
+        "multiple_observed_egresses": 3,
+        "one_observed_egress": 10,
+        "no_observed_egress": 8
+      },
+      "sample_status_counts_by_mode": {
+        "ech": {
+          "OK": 64,
+          "TLS_OR_HTTP_ERROR": 41
+        },
+        "plain": {
+          "TLS_OR_HTTP_ERROR": 105
+        }
+      }
+    },
+    {
+      "run_index": 2,
+      "address_count": 21,
+      "attempt_count": 210,
+      "address_mode_groups": 42,
+      "address_outcomes": {
+        "multiple_observed_egresses": 3,
+        "one_observed_egress": 10,
+        "no_observed_egress": 8
+      },
+      "sample_status_counts_by_mode": {
+        "ech": {
+          "OK": 65,
+          "TLS_OR_HTTP_ERROR": 40
+        },
+        "plain": {
+          "TLS_OR_HTTP_ERROR": 105
+        }
+      }
+    },
+    {
+      "run_index": 3,
+      "address_count": 21,
+      "attempt_count": 210,
+      "address_mode_groups": 42,
+      "address_outcomes": {
+        "multiple_observed_egresses": 3,
+        "one_observed_egress": 9,
+        "no_observed_egress": 9
+      },
+      "sample_status_counts_by_mode": {
+        "ech": {
+          "ECH_CONFIG_ERROR": 105
+        },
+        "plain": {
+          "OK": 59,
+          "TLS_OR_HTTP_ERROR": 46
+        }
+      }
+    }
+  ],
+  "earlier_expanded_scan": {
+    "complete": false,
+    "target_address_count": 65,
+    "sampled_address_count": 2,
+    "attempt_count": 18
+  },
+  "scope_limits": [
+    "No individual endpoints or egresses exported.",
+    "No attribution of filtering, BGP cause or operator.",
+    "A successful trace is not a full VLESS/XHTTP test.",
+    "Separate previously described 69-address input was not matched to this target set."
+  ]
+}

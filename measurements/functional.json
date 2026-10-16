@@ -1,0 +1,38 @@
+{
+  "classification": "Diagnostic test evidence; passing cases are not a production-readiness claim.",
+  "final_lua_diagnostic": {
+    "cross_host_coordination_established": false,
+    "failed": 0,
+    "limitations": [
+      "No WAN test",
+      "No network partition test",
+      "No durable ownership test",
+      "No panel integration test"
+    ],
+    "passed": 15,
+    "status": "pass",
+    "tests": 15,
+    "topology": "two simulated nodes on one host"
+  },
+  "initial_lua_diagnostic": {
+    "failed": 1,
+    "failure_category": "non_loopback_udp_wildcard_listener_detected",
+    "failure_retained": true,
+    "passed": 14,
+    "private_listener_details_included": false,
+    "tests": 15
+  },
+  "native_third_ip_diagnostic": {
+    "account_count": 16,
+    "denial_count": 48,
+    "denials_per_run": [
+      16,
+      16,
+      16
+    ],
+    "held_flow_count": 32,
+    "run_count": 3,
+    "scope": "Synthetic loopback diagnostic on one host."
+  },
+  "schema_version": 1
+}

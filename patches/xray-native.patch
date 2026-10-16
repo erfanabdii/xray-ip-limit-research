@@ -1,0 +1,1344 @@
+diff --git a/app/dispatcher/default.go b/app/dispatcher/default.go
+--- a/app/dispatcher/default.go
++++ b/app/dispatcher/default.go
+@@ -10,6 +10,7 @@ import (
+ 	"github.com/xtls/xray-core/common/buf"
+ 	"github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/common/log"
++	"github.com/xtls/xray-core/common/nativeiplimit"
+ 	"github.com/xtls/xray-core/common/net"
+ 	"github.com/xtls/xray-core/common/protocol"
+ 	"github.com/xtls/xray-core/common/session"
+@@ -222,6 +223,9 @@ func WrapLink(ctx context.Context, policyManager policy.Manager, statsManager st
+ }
+ 
+ func trackOnlineIP(ctx context.Context, sm stats.Manager, email, ip string) {
++	if nativeiplimit.Reserved(ctx, email, ip) {
++		return
++	}
+ 	name := "user>>>" + email + ">>>online"
+ 	if om, _ := sm.GetOrRegisterOnlineMap(name); om != nil {
+ 		om.AddIP(ip)
+@@ -268,6 +272,11 @@ func (d *DefaultDispatcher) Dispatch(ctx context.Context, destination net.Destin
+ 	if !destination.IsValid() {
+ 		panic("Dispatcher: Invalid destination.")
+ 	}
++	var err error
++	ctx, err = nativeiplimit.Gate(ctx, d.stats)
++	if err != nil {
++		return nil, err
++	}
+ 	outbounds := session.OutboundsFromContext(ctx)
+ 	if len(outbounds) == 0 {
+ 		outbounds = []*session.Outbound{{}}
+@@ -325,6 +334,11 @@ func (d *DefaultDispatcher) DispatchLink(ctx context.Context, destination net.De
+ 	if !destination.IsValid() {
+ 		return errors.New("Dispatcher: Invalid destination.")
+ 	}
++	var err error
++	ctx, err = nativeiplimit.Gate(ctx, d.stats)
++	if err != nil {
++		return err
++	}
+ 	outbounds := session.OutboundsFromContext(ctx)
+ 	if len(outbounds) == 0 {
+ 		outbounds = []*session.Outbound{{}}
+diff --git a/app/stats/online_map.go b/app/stats/online_map.go
+--- a/app/stats/online_map.go
++++ b/app/stats/online_map.go
+@@ -53,6 +53,35 @@ func (om *OnlineMap) AddIP(ip string) {
+ 	}
+ }
+ 
++// TryAddIP increments the reference count for ip if its unique-IP limit allows
++// it. The check and reservation share the same lock as AddIP, so concurrent
++// new addresses cannot exceed a positive limit. An already-present address is
++// always admitted, even when the map is at or above the limit.
++func (om *OnlineMap) TryAddIP(ip string, limit int) bool {
++	if ip == localhostIPv4 || ip == localhostIPv6 {
++		return false
++	}
++
++	now := time.Now().Unix()
++	om.access.Lock()
++	defer om.access.Unlock()
++	if e, ok := om.entries[ip]; ok {
++		e.refCount++
++		e.lastSeen = now
++		om.entries[ip] = e
++		return true
++	}
++	if limit > 0 && len(om.entries) >= limit {
++		return false
++	}
++	om.entries[ip] = ipEntry{
++		refCount: 1,
++		lastSeen: now,
++	}
++	om.count.Add(1)
++	return true
++}
++
+ // RemoveIP implements stats.OnlineMap.
+ func (om *OnlineMap) RemoveIP(ip string) {
+ 	om.access.Lock()
+diff --git a/app/stats/online_map_test.go b/app/stats/online_map_test.go
+new file mode 100644
+--- /dev/null
++++ b/app/stats/online_map_test.go
+@@ -0,0 +1,73 @@
++package stats
++
++import (
++	"fmt"
++	"sync"
++	"testing"
++)
++
++func TestOnlineMapTryAddIPConcurrentLimit(t *testing.T) {
++	om := NewOnlineMap()
++	const limit = 7
++	const attempts = 64
++
++	var wg sync.WaitGroup
++	var mu sync.Mutex
++	accepted := 0
++	for i := 0; i < attempts; i++ {
++		wg.Add(1)
++		go func(i int) {
++			defer wg.Done()
++			if om.TryAddIP(fmt.Sprintf("192.0.2.%d", i+1), limit) {
++				mu.Lock()
++				accepted++
++				mu.Unlock()
++			}
++		}(i)
++	}
++	wg.Wait()
++
++	if accepted != limit {
++		t.Fatalf("accepted %d new IPs, want %d", accepted, limit)
++	}
++	if got := om.Count(); got != limit {
++		t.Fatalf("count = %d, want %d", got, limit)
++	}
++}
++
++func TestOnlineMapTryAddIPKnownAddressAndRelease(t *testing.T) {
++	om := NewOnlineMap()
++	const address = "192.0.2.10"
++	const otherAddress = "192.0.2.11"
++	const reservations = 32
++	if !om.TryAddIP(address, 1) {
++		t.Fatal("first IP was rejected")
++	}
++	om.AddIP(otherAddress)
++
++	var wg sync.WaitGroup
++	for i := 0; i < reservations; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			if !om.TryAddIP(address, 1) {
++				t.Error("known IP was rejected at its limit")
++			}
++		}()
++	}
++	wg.Wait()
++	if got := om.Count(); got != 2 {
++		t.Fatalf("count after same-IP reservations = %d, want 2", got)
++	}
++
++	for i := 0; i < reservations+1; i++ {
++		om.RemoveIP(address)
++	}
++	if got := om.Count(); got != 1 {
++		t.Fatalf("count after releasing one address = %d, want 1", got)
++	}
++	om.RemoveIP(otherAddress)
++	if got := om.Count(); got != 0 {
++		t.Fatalf("count after releases = %d, want 0", got)
++	}
++}
+diff --git a/common/nativeiplimit/nativeiplimit.go b/common/nativeiplimit/nativeiplimit.go
+new file mode 100644
+--- /dev/null
++++ b/common/nativeiplimit/nativeiplimit.go
+@@ -0,0 +1,290 @@
++// Package nativeiplimit implements an optional, locally configured native
++// unique-IP admission limit for selected authenticated users.
++package nativeiplimit
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"net"
++	"os"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/stats"
++)
++
++const (
++	policyEmailsEnv = "XRAY_NATIVE_IP_LIMIT_EMAILS"
++	policyFileEnv   = "XRAY_NATIVE_IP_LIMIT_FILE"
++	maxPolicyBytes  = 64 * 1024
++	watchInterval   = 2 * time.Second
++)
++
++type policySnapshot struct {
++	users map[string]int
++}
++
++type policyDocument struct {
++	Version int            `json:"version"`
++	Users   map[string]int `json:"users"`
++}
++
++type fileStamp struct {
++	info    os.FileInfo
++	size    int64
++	modTime int64
++}
++
++type policyState struct {
++	allowlist map[string]struct{}
++	path      string
++	snapshot  atomic.Pointer[policySnapshot]
++
++	mu          sync.Mutex
++	last        fileStamp
++	haveLast    bool
++	lastStatErr bool
++}
++
++var activePolicy = newPolicyState(nil, "")
++
++type reservationContextKey struct{}
++
++type reservationMarker struct {
++	email string
++	ip    string
++}
++
++type ipReserver interface {
++	TryAddIP(string, int) bool
++}
++
++func init() {
++	value, emailsSet := os.LookupEnv(policyEmailsEnv)
++	path, pathSet := os.LookupEnv(policyFileEnv)
++	if !emailsSet || !pathSet || value == "" || path == "" {
++		return
++	}
++
++	allowlist, err := parseAllowlist(value)
++	if err != nil {
++		log.Printf("native IP limit disabled: invalid %s: %v", policyEmailsEnv, err)
++		return
++	}
++
++	activePolicy = newPolicyState(allowlist, path)
++	if err := activePolicy.initialize(); err != nil {
++		log.Printf("native IP limit disabled until a valid policy is available: %v", err)
++	}
++	go activePolicy.watch()
++}
++
++func newPolicyState(allowlist map[string]struct{}, path string) *policyState {
++	copyAllowlist := make(map[string]struct{}, len(allowlist))
++	for email := range allowlist {
++		copyAllowlist[email] = struct{}{}
++	}
++	s := &policyState{allowlist: copyAllowlist, path: path}
++	s.snapshot.Store(&policySnapshot{users: map[string]int{}})
++	return s
++}
++
++func parseAllowlist(value string) (map[string]struct{}, error) {
++	allowlist := make(map[string]struct{})
++	for _, item := range strings.Split(value, ",") {
++		email := strings.TrimSpace(item)
++		if email == "" {
++			return nil, fmt.Errorf("email allowlist contains an empty entry")
++		}
++		allowlist[email] = struct{}{}
++	}
++	return allowlist, nil
++}
++
++func (s *policyState) initialize() error {
++	if s.path == "" || len(s.allowlist) == 0 {
++		return nil
++	}
++	_, err := s.reloadIfChanged()
++	return err
++}
++
++func (s *policyState) watch() {
++	if s.path == "" || len(s.allowlist) == 0 {
++		return
++	}
++	ticker := time.NewTicker(watchInterval)
++	defer ticker.Stop()
++	for range ticker.C {
++		changed, err := s.reloadIfChanged()
++		if changed && err != nil {
++			log.Printf("native IP limit policy update ignored: %v", err)
++		}
++	}
++}
++
++func (s *policyState) reloadIfChanged() (bool, error) {
++	s.mu.Lock()
++	defer s.mu.Unlock()
++
++	info, err := os.Stat(s.path)
++	if err != nil {
++		changed := !s.lastStatErr || s.haveLast
++		s.lastStatErr = true
++		s.haveLast = false
++		return changed, fmt.Errorf("stat policy file: %w", err)
++	}
++
++	stamp := fileStamp{info: info, size: info.Size(), modTime: info.ModTime().UnixNano()}
++	changed := s.lastStatErr || !s.haveLast || !sameStamp(s.last, stamp)
++	if !changed {
++		return false, nil
++	}
++	s.last = stamp
++	s.haveLast = true
++	s.lastStatErr = false
++
++	snapshot, err := readPolicyFile(s.path, s.allowlist)
++	if err != nil {
++		return true, err
++	}
++	s.snapshot.Store(snapshot)
++	return true, nil
++}
++
++func sameStamp(a, b fileStamp) bool {
++	return os.SameFile(a.info, b.info) && a.size == b.size && a.modTime == b.modTime
++}
++
++func (s *policyState) applyFile() error {
++	snapshot, err := readPolicyFile(s.path, s.allowlist)
++	if err != nil {
++		return err
++	}
++	s.snapshot.Store(snapshot)
++	return nil
++}
++
++func readPolicyFile(path string, allowlist map[string]struct{}) (*policySnapshot, error) {
++	file, err := os.Open(path)
++	if err != nil {
++		return nil, fmt.Errorf("open policy file: %w", err)
++	}
++	defer file.Close()
++
++	data, err := io.ReadAll(io.LimitReader(file, maxPolicyBytes+1))
++	if err != nil {
++		return nil, fmt.Errorf("read policy file: %w", err)
++	}
++	if len(data) > maxPolicyBytes {
++		return nil, fmt.Errorf("policy file exceeds %d bytes", maxPolicyBytes)
++	}
++
++	decoder := json.NewDecoder(strings.NewReader(string(data)))
++	decoder.DisallowUnknownFields()
++	var document policyDocument
++	if err := decoder.Decode(&document); err != nil {
++		return nil, fmt.Errorf("decode policy file: %w", err)
++	}
++	if err := decoder.Decode(new(any)); err != io.EOF {
++		if err == nil {
++			return nil, fmt.Errorf("policy file contains trailing JSON")
++		}
++		return nil, fmt.Errorf("decode policy trailer: %w", err)
++	}
++	if document.Version != 1 {
++		return nil, fmt.Errorf("unsupported policy version %d", document.Version)
++	}
++	if document.Users == nil {
++		return nil, fmt.Errorf("policy users must be an object")
++	}
++
++	users := make(map[string]int, len(document.Users))
++	for email, limit := range document.Users {
++		if _, ok := allowlist[email]; !ok {
++			return nil, fmt.Errorf("policy user %q is outside the configured email allowlist", email)
++		}
++		if limit < 0 {
++			return nil, fmt.Errorf("policy limit for %q must be nonnegative", email)
++		}
++		users[email] = limit
++	}
++	return &policySnapshot{users: users}, nil
++}
++
++// Gate reserves one unique source IP for a scoped authenticated user before
++// routing begins. Users without a positive configured limit follow the stock
++// path without map lookup or reservation work.
++func Gate(ctx context.Context, manager stats.Manager) (context.Context, error) {
++	return gateWithState(ctx, manager, activePolicy)
++}
++
++func gateWithState(ctx context.Context, manager stats.Manager, state *policyState) (context.Context, error) {
++	if ctx == nil {
++		return nil, fmt.Errorf("native IP limit received a nil context")
++	}
++	inbound := session.InboundFromContext(ctx)
++	if inbound == nil || inbound.User == nil || inbound.User.Email == "" || state == nil {
++		return ctx, nil
++	}
++
++	snapshot := state.snapshot.Load()
++	if snapshot == nil {
++		return ctx, nil
++	}
++	limit, configured := snapshot.users[inbound.User.Email]
++	if !configured || limit <= 0 {
++		return ctx, nil
++	}
++
++	address := inbound.Source.Address
++	if address == nil || !address.Family().IsIP() || address.IP() == nil {
++		return nil, fmt.Errorf("native IP limit requires a valid source IP for user %q", inbound.User.Email)
++	}
++	ip := address.String()
++	parsedIP := address.IP()
++	if parsedIP.Equal(net.ParseIP("127.0.0.1")) || parsedIP.Equal(net.ParseIP("::1")) {
++		return nil, fmt.Errorf("native IP limit rejects localhost source for user %q", inbound.User.Email)
++	}
++	if Reserved(ctx, inbound.User.Email, ip) {
++		return ctx, nil
++	}
++	if manager == nil {
++		return nil, fmt.Errorf("native IP limit stats manager is unavailable for user %q", inbound.User.Email)
++	}
++
++	name := "user>>>" + inbound.User.Email + ">>>online"
++	onlineMap, err := manager.GetOrRegisterOnlineMap(name)
++	if err != nil || onlineMap == nil {
++		if err != nil {
++			return nil, fmt.Errorf("native IP limit online map unavailable for user %q: %w", inbound.User.Email, err)
++		}
++		return nil, fmt.Errorf("native IP limit online map unavailable for user %q", inbound.User.Email)
++	}
++	reserver, ok := onlineMap.(ipReserver)
++	if !ok {
++		return nil, fmt.Errorf("native IP limit online map cannot reserve IPs for user %q", inbound.User.Email)
++	}
++	if !reserver.TryAddIP(ip, limit) {
++		return nil, fmt.Errorf("native IP limit reached for user %q", inbound.User.Email)
++	}
++
++	context.AfterFunc(ctx, func() { onlineMap.RemoveIP(ip) })
++	return context.WithValue(ctx, reservationContextKey{}, reservationMarker{email: inbound.User.Email, ip: ip}), nil
++}
++
++// Reserved reports whether ctx already carries this exact account/IP
++// reservation. The marker is inherited by child mux contexts.
++func Reserved(ctx context.Context, email, ip string) bool {
++	if ctx == nil {
++		return false
++	}
++	marker, ok := ctx.Value(reservationContextKey{}).(reservationMarker)
++	return ok && marker.email == email && marker.ip == ip
++}
+diff --git a/common/nativeiplimit/nativeiplimit_test.go b/common/nativeiplimit/nativeiplimit_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/nativeiplimit/nativeiplimit_test.go
+@@ -0,0 +1,257 @@
++package nativeiplimit
++
++import (
++	"context"
++	"encoding/json"
++	"os"
++	"path/filepath"
++	"testing"
++	"time"
++
++	appstats "github.com/xtls/xray-core/app/stats"
++	commonnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/session"
++	featurestats "github.com/xtls/xray-core/features/stats"
++)
++
++func TestGateScopeAndAccountIsolation(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1, "other": 1})
++	manager := newStatsManager(t)
++
++	testContext, cancelTest := inboundContext("alice", "192.0.2.1")
++	defer cancelTest()
++	reserved, err := gateWithState(testContext, manager, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !Reserved(reserved, "alice", "192.0.2.1") {
++		t.Fatal("scoped user did not receive a reservation marker")
++	}
++
++	secondContext, cancelSecond := inboundContext("alice", "192.0.2.2")
++	defer cancelSecond()
++	if _, err := gateWithState(secondContext, manager, state); err == nil {
++		t.Fatal("second IP was admitted above the limit")
++	}
++
++	otherContext, cancelOther := inboundContext("other", "192.0.2.2")
++	defer cancelOther()
++	otherReserved, err := gateWithState(otherContext, manager, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !Reserved(otherReserved, "other", "192.0.2.2") {
++		t.Fatal("second account did not receive its own reservation")
++	}
++	assertOnlineCount(t, manager, "user>>>alice>>>online", 1)
++	assertOnlineCount(t, manager, "user>>>other>>>online", 1)
++}
++
++func TestGateNestedReservationAndRelease(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++	ctx, cancel := inboundContext("alice", "192.0.2.3")
++	defer cancel()
++
++	reserved, err := gateWithState(ctx, manager, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	nested := session.SubContextFromMuxInbound(reserved)
++	if _, err := gateWithState(nested, manager, state); err != nil {
++		t.Fatal(err)
++	}
++	if !Reserved(nested, "alice", "192.0.2.3") {
++		t.Fatal("nested mux context did not inherit the reservation")
++	}
++	assertOnlineCount(t, manager, "user>>>alice>>>online", 1)
++
++	cancel()
++	waitOnlineCount(t, manager, "user>>>alice>>>online", 0)
++}
++
++func TestGateRequiresSourceAndReservationSupportOnlyForLimitedUser(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++
++	invalidSource := session.ContextWithInbound(context.Background(), &session.Inbound{
++		User: &protocol.MemoryUser{Email: "alice"},
++	})
++	if _, err := gateWithState(invalidSource, manager, state); err == nil {
++		t.Fatal("limited user with no source address was accepted")
++	}
++
++	localhost, cancelLocalhost := inboundContext("alice", "127.0.0.1")
++	defer cancelLocalhost()
++	if _, err := gateWithState(localhost, manager, state); err == nil {
++		t.Fatal("localhost source was accepted")
++	}
++
++	ordinary, cancelOrdinary := inboundContext("unmanaged", "not-an-ip")
++	defer cancelOrdinary()
++	if returned, err := gateWithState(ordinary, manager, state); err != nil || returned != ordinary {
++		t.Fatalf("unmanaged account should follow stock path: ctx=%v err=%v", returned, err)
++	}
++
++	valid, cancelValid := inboundContext("alice", "192.0.2.4")
++	defer cancelValid()
++	if _, err := gateWithState(valid, nil, state); err == nil {
++		t.Fatal("limited user was accepted without a stats manager")
++	}
++	if _, err := gateWithState(valid, featurestats.NoopManager{}, state); err == nil {
++		t.Fatal("limited user was accepted without an online map")
++	}
++	if _, err := gateWithState(valid, unsupportedOnlineMapManager{}, state); err == nil {
++		t.Fatal("online map without TryAddIP was accepted")
++	}
++}
++
++func TestPolicyReloadZeroAndMalformedRetainsPrevious(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "policy.json")
++	state := newPolicyState(map[string]struct{}{"alice": {}}, path)
++	writePolicy(t, path, map[string]int{"alice": 1})
++	if err := state.applyFile(); err != nil {
++		t.Fatal(err)
++	}
++
++	manager := newStatsManager(t)
++	first, cancelFirst := inboundContext("alice", "192.0.2.5")
++	defer cancelFirst()
++	if _, err := gateWithState(first, manager, state); err != nil {
++		t.Fatal(err)
++	}
++
++	writePolicy(t, path, map[string]int{"alice": -1})
++	if err := state.applyFile(); err == nil {
++		t.Fatal("negative limit was accepted")
++	}
++	second, cancelSecond := inboundContext("alice", "192.0.2.6")
++	defer cancelSecond()
++	if _, err := gateWithState(second, manager, state); err == nil {
++		t.Fatal("malformed update replaced the previous positive limit")
++	}
++
++	writePolicy(t, path, map[string]int{"alice": 0})
++	if err := state.applyFile(); err != nil {
++		t.Fatal(err)
++	}
++	third, cancelThird := inboundContext("alice", "192.0.2.6")
++	defer cancelThird()
++	returned, err := gateWithState(third, manager, state)
++	if err != nil || returned != third || Reserved(returned, "alice", "192.0.2.6") {
++		t.Fatalf("zero limit should disable reservation: ctx=%v err=%v", returned, err)
++	}
++	assertOnlineCount(t, manager, "user>>>alice>>>online", 1)
++}
++
++func TestPolicyRejectsUnknownScopeAndOversizedInput(t *testing.T) {
++	path := filepath.Join(t.TempDir(), "policy.json")
++	state := newPolicyState(map[string]struct{}{"alice": {}}, path)
++	if err := os.WriteFile(path, []byte(`{"version":2,"users":{"alice":1}}`), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := state.applyFile(); err == nil {
++		t.Fatal("unsupported policy version was accepted")
++	}
++
++	writePolicy(t, path, map[string]int{"other": 1})
++	if err := state.applyFile(); err == nil {
++		t.Fatal("policy user outside allowlist was accepted")
++	}
++
++	if err := os.WriteFile(path, make([]byte, maxPolicyBytes+1), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := state.applyFile(); err == nil {
++		t.Fatal("oversized policy file was accepted")
++	}
++}
++
++func stateWithCaps(t *testing.T, caps map[string]int) *policyState {
++	t.Helper()
++	path := filepath.Join(t.TempDir(), "policy.json")
++	allowlist := make(map[string]struct{}, len(caps))
++	for email := range caps {
++		allowlist[email] = struct{}{}
++	}
++	state := newPolicyState(allowlist, path)
++	writePolicy(t, path, caps)
++	if err := state.applyFile(); err != nil {
++		t.Fatal(err)
++	}
++	return state
++}
++
++func writePolicy(t *testing.T, path string, users map[string]int) {
++	t.Helper()
++	data, err := json.Marshal(policyDocument{Version: 1, Users: users})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, data, 0o600); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func newStatsManager(t *testing.T) *appstats.Manager {
++	t.Helper()
++	manager, err := appstats.NewManager(context.Background(), &appstats.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return manager
++}
++
++func inboundContext(email, source string) (context.Context, context.CancelFunc) {
++	ctx, cancel := context.WithCancel(context.Background())
++	return session.ContextWithInbound(ctx, &session.Inbound{
++		User:   &protocol.MemoryUser{Email: email},
++		Source: commonnet.Destination{Address: commonnet.ParseAddress(source)},
++	}), cancel
++}
++
++func assertOnlineCount(t *testing.T, manager *appstats.Manager, name string, want int) {
++	t.Helper()
++	onlineMap := manager.GetOnlineMap(name)
++	if onlineMap == nil {
++		if want == 0 {
++			return
++		}
++		t.Fatalf("online map %q was not created", name)
++	}
++	if got := onlineMap.Count(); got != want {
++		t.Fatalf("online map %q count = %d, want %d", name, got, want)
++	}
++}
++
++func waitOnlineCount(t *testing.T, manager *appstats.Manager, name string, want int) {
++	t.Helper()
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		onlineMap := manager.GetOnlineMap(name)
++		if onlineMap == nil && want == 0 {
++			return
++		}
++		if onlineMap != nil && onlineMap.Count() == want {
++			return
++		}
++		time.Sleep(time.Millisecond)
++	}
++	assertOnlineCount(t, manager, name, want)
++}
++
++type unsupportedOnlineMapManager struct {
++	featurestats.NoopManager
++}
++
++func (unsupportedOnlineMapManager) GetOrRegisterOnlineMap(string) (featurestats.OnlineMap, error) {
++	return unsupportedOnlineMap{}, nil
++}
++
++type unsupportedOnlineMap struct{}
++
++func (unsupportedOnlineMap) Count() int                       { return 0 }
++func (unsupportedOnlineMap) AddIP(string)                     {}
++func (unsupportedOnlineMap) RemoveIP(string)                  {}
++func (unsupportedOnlineMap) ForEach(func(string, int64) bool) {}
+diff --git a/common/nativeiplimit/nativeiplimit_benchmark_test.go b/common/nativeiplimit/nativeiplimit_benchmark_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/nativeiplimit/nativeiplimit_benchmark_test.go
+@@ -0,0 +1,194 @@
++package nativeiplimit
++
++import (
++	"context"
++	"runtime"
++	"testing"
++	"time"
++
++	appstats "github.com/xtls/xray-core/app/stats"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/protocol"
++	"github.com/xtls/xray-core/common/session"
++)
++
++const (
++	benchmarkOnlineMapName = "user>>>alice>>>online"
++	knownIPCleanupBatch    = 256
++)
++
++type benchmarkOnlineCounter interface {
++	Count() int
++}
++
++func benchmarkContext(email, ip string) (context.Context, context.CancelFunc) {
++	base, cancel := context.WithCancel(context.Background())
++	return session.ContextWithInbound(base, &session.Inbound{
++		User:   &protocol.MemoryUser{Email: email},
++		Source: net.Destination{Address: net.ParseAddress(ip)},
++	}), cancel
++}
++
++func benchmarkPolicy() *policyState {
++	state := newPolicyState(map[string]struct{}{"alice": {}}, "")
++	state.snapshot.Store(&policySnapshot{users: map[string]int{"alice": 1}})
++	return state
++}
++
++func benchmarkManager(b *testing.B) *appstats.Manager {
++	b.Helper()
++	manager, err := appstats.NewManager(context.Background(), &appstats.Config{})
++	if err != nil {
++		b.Fatal(err)
++	}
++	return manager
++}
++
++func benchmarkOnlineMap(b *testing.B, manager *appstats.Manager) benchmarkOnlineCounter {
++	b.Helper()
++	onlineMap := manager.GetOnlineMap(benchmarkOnlineMapName)
++	if onlineMap == nil {
++		b.Fatal("benchmark online map was not registered")
++	}
++	return onlineMap
++}
++
++func reserveBenchmarkAnchor(b *testing.B, manager *appstats.Manager, state *policyState, ip string) (context.Context, context.CancelFunc, benchmarkOnlineCounter) {
++	b.Helper()
++	ctx, cancel := benchmarkContext("alice", ip)
++	reserved, err := gateWithState(ctx, manager, state)
++	if err != nil {
++		cancel()
++		b.Fatal(err)
++	}
++	if !Reserved(reserved, "alice", ip) {
++		cancel()
++		b.Fatal("benchmark anchor did not reserve its source IP")
++	}
++	return reserved, cancel, benchmarkOnlineMap(b, manager)
++}
++
++func cleanupBenchmarkAnchor(b *testing.B, cancel context.CancelFunc, onlineMap benchmarkOnlineCounter) {
++	b.Helper()
++	cancel()
++	waitBenchmarkOnlineCount(b, onlineMap, 0)
++}
++
++func waitBenchmarkOnlineCount(b *testing.B, onlineMap benchmarkOnlineCounter, want int) {
++	b.Helper()
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		if got := onlineMap.Count(); got == want {
++			return
++		}
++		runtime.Gosched()
++		time.Sleep(100 * time.Microsecond)
++	}
++	b.Fatalf("online IP count did not return to %d; got %d", want, onlineMap.Count())
++}
++
++func BenchmarkGate(b *testing.B) {
++	b.Run("unmanaged_email_fastpath", func(b *testing.B) {
++		state := benchmarkPolicy()
++		ctx, cancel := benchmarkContext("control", "192.0.2.1")
++		defer func() {
++			b.StopTimer()
++			cancel()
++		}()
++
++		b.ReportAllocs()
++		b.ResetTimer()
++		for i := 0; i < b.N; i++ {
++			got, err := gateWithState(ctx, nil, state)
++			if err != nil || got != ctx {
++				b.Fatalf("unmanaged fast path returned ctx=%p err=%v", got, err)
++			}
++		}
++	})
++
++	b.Run("already_reserved_nested_context", func(b *testing.B) {
++		state := benchmarkPolicy()
++		manager := benchmarkManager(b)
++		reservedAnchor, cancel, onlineMap := reserveBenchmarkAnchor(b, manager, state, "192.0.2.10")
++		nested := context.WithValue(reservedAnchor, struct{ name string }{"nested"}, true)
++		defer func() {
++			b.StopTimer()
++			cleanupBenchmarkAnchor(b, cancel, onlineMap)
++		}()
++
++		b.ReportAllocs()
++		b.ResetTimer()
++		for i := 0; i < b.N; i++ {
++			got, err := gateWithState(nested, nil, state)
++			if err != nil || got != nested {
++				b.Fatalf("nested reservation returned ctx=%p err=%v", got, err)
++			}
++		}
++	})
++
++	b.Run("rejected_second_ip_at_cap_1", func(b *testing.B) {
++		state := benchmarkPolicy()
++		manager := benchmarkManager(b)
++		_, cancelAnchor, onlineMap := reserveBenchmarkAnchor(b, manager, state, "192.0.2.20")
++		second, cancelSecond := benchmarkContext("alice", "192.0.2.21")
++		defer func() {
++			b.StopTimer()
++			cancelSecond()
++			cleanupBenchmarkAnchor(b, cancelAnchor, onlineMap)
++		}()
++
++		b.ReportAllocs()
++		b.ResetTimer()
++		for i := 0; i < b.N; i++ {
++			if _, err := gateWithState(second, manager, state); err == nil {
++				b.Fatal("second IP was admitted at cap 1")
++			}
++		}
++	})
++
++	b.Run("admitted_known_ip_fresh_context_cleanup_batch_256", func(b *testing.B) {
++		state := benchmarkPolicy()
++		manager := benchmarkManager(b)
++		b.ReportAllocs()
++		b.ResetTimer()
++
++		completed := 0
++		for completed < b.N {
++			batch := min(knownIPCleanupBatch, b.N-completed)
++			b.StopTimer()
++			_, cancelAnchor, onlineMap := reserveBenchmarkAnchor(b, manager, state, "192.0.2.30")
++			contexts := make([]context.Context, batch)
++			cancels := make([]context.CancelFunc, batch)
++			for i := range contexts {
++				contexts[i], cancels[i] = benchmarkContext("alice", "192.0.2.30")
++			}
++
++			var gateErr error
++			var lastReserved context.Context
++			b.StartTimer()
++			for _, ctx := range contexts {
++				reserved, err := gateWithState(ctx, manager, state)
++				if err != nil {
++					gateErr = err
++					break
++				}
++				lastReserved = reserved
++			}
++			b.StopTimer()
++			markerMissing := gateErr == nil && !Reserved(lastReserved, "alice", "192.0.2.30")
++			for _, cancel := range cancels {
++				cancel()
++			}
++			cleanupBenchmarkAnchor(b, cancelAnchor, onlineMap)
++			if gateErr != nil {
++				b.Fatal(gateErr)
++			}
++			if markerMissing {
++				b.Fatal("admitted known IP did not carry its reservation marker")
++			}
++			completed += batch
++			b.StartTimer()
++		}
++		b.StopTimer()
++	})
++}
+diff --git a/common/nativeiplimit/validation_pass2_test.go b/common/nativeiplimit/validation_pass2_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/nativeiplimit/validation_pass2_test.go
+@@ -0,0 +1,362 @@
++package nativeiplimit
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"runtime"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	appstats "github.com/xtls/xray-core/app/stats"
++	featurestats "github.com/xtls/xray-core/features/stats"
++)
++
++const validationOnlineMapName = "user>>>alice>>>online"
++
++func TestValidationCapOneConcurrentDifferentIPsHasExactlyOneWinner(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++
++	const contenders = 128
++	type result struct {
++		ip  string
++		ctx context.Context
++		err error
++	}
++	start := make(chan struct{})
++	results := make(chan result, contenders)
++	cancels := make([]context.CancelFunc, contenders)
++	for i := 0; i < contenders; i++ {
++		ip := fmt.Sprintf("198.51.100.%d", i+1)
++		ctx, cancel := inboundContext("alice", ip)
++		cancels[i] = cancel
++		go func(ip string, ctx context.Context) {
++			<-start
++			reserved, err := gateWithState(ctx, manager, state)
++			results <- result{ip: ip, ctx: reserved, err: err}
++		}(ip, ctx)
++	}
++	close(start)
++
++	winners := 0
++	var winnerIP string
++	for i := 0; i < contenders; i++ {
++		got := <-results
++		if got.err == nil {
++			winners++
++			winnerIP = got.ip
++			if !Reserved(got.ctx, "alice", got.ip) {
++				t.Errorf("winner %q has no matching reservation marker", got.ip)
++			}
++		}
++	}
++	if winners != 1 {
++		t.Fatalf("simultaneous admissions accepted %d unique IPs, want exactly 1", winners)
++	}
++	assertOnlineCount(t, manager, validationOnlineMapName, 1)
++
++	for _, cancel := range cancels {
++		cancel()
++	}
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++	if winnerIP == "" {
++		t.Fatal("the winning IP was not recorded")
++	}
++}
++
++func TestValidationSameIPRootContextsReleaseOnlyAfterLastCancel(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager, countedManager, countedMap := newRemovalCountingManager(t)
++
++	const reservations = 96
++	const ip = "192.0.2.80"
++	cancels := make([]context.CancelFunc, reservations)
++	for i := range cancels {
++		ctx, cancel := inboundContext("alice", ip)
++		cancels[i] = cancel
++		reserved, err := gateWithState(ctx, countedManager, state)
++		if err != nil {
++			t.Fatalf("root context %d for the already admitted IP was rejected: %v", i, err)
++		}
++		if !Reserved(reserved, "alice", ip) {
++			t.Fatalf("root context %d has no reservation marker", i)
++		}
++	}
++	assertOnlineCount(t, manager, validationOnlineMapName, 1)
++
++	for _, cancel := range cancels[:reservations-1] {
++		cancel()
++	}
++	waitRemovalCount(t, countedMap, reservations-1)
++	if got := manager.GetOnlineMap(validationOnlineMapName).Count(); got != 1 {
++		t.Fatalf("unique-IP count after canceling %d of %d roots = %d, want 1", reservations-1, reservations, got)
++	}
++	if got := countedMap.removals.Load(); got != reservations-1 {
++		t.Fatalf("release callbacks before last cancel = %d, want %d", got, reservations-1)
++	}
++
++	cancels[reservations-1]()
++	waitRemovalCount(t, countedMap, reservations)
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++	if got := countedMap.removals.Load(); got != reservations {
++		t.Fatalf("total release callbacks = %d, want %d", got, reservations)
++	}
++}
++
++func TestValidationAlternatingIPReservationChurnLeavesNoRetainedState(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 2})
++	manager, countedManager, countedMap := newRemovalCountingManager(t)
++
++	const batchSize = 64
++	const churnBatches = 256
++	const churnReservations = batchSize * churnBatches
++	const warmupReservations = batchSize
++
++	runAlternatingReservationBatches(t, manager, countedManager, countedMap, state, 1, batchSize, 0)
++	waitRemovalCount(t, countedMap, warmupReservations)
++	settleValidationRuntime()
++
++	var before runtime.MemStats
++	runtime.ReadMemStats(&before)
++	beforeGoroutines := runtime.NumGoroutine()
++
++	runAlternatingReservationBatches(t, manager, countedManager, countedMap, state, churnBatches, batchSize, warmupReservations)
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++	waitRemovalCount(t, countedMap, warmupReservations+churnReservations)
++	settleValidationRuntime()
++
++	var after runtime.MemStats
++	runtime.ReadMemStats(&after)
++	afterGoroutines := runtime.NumGoroutine()
++	heapDelta := int64(after.HeapAlloc) - int64(before.HeapAlloc)
++	allocDelta := after.TotalAlloc - before.TotalAlloc
++	goroutineDelta := afterGoroutines - beforeGoroutines
++	t.Logf("churn reservations=%d batches=%d batch_size=%d; HeapAlloc before=%d after=%d delta=%d bytes; TotalAlloc before=%d after=%d delta=%d bytes; goroutines before=%d after=%d delta=%d",
++		churnReservations, churnBatches, batchSize,
++		before.HeapAlloc, after.HeapAlloc, heapDelta,
++		before.TotalAlloc, after.TotalAlloc, allocDelta,
++		beforeGoroutines, afterGoroutines, goroutineDelta)
++
++	if allocDelta == 0 {
++		t.Fatal("TotalAlloc did not change during reservation churn; allocation evidence is unavailable")
++	}
++	const retainedHeapAllowance = 8 << 20
++	if heapDelta > retainedHeapAllowance {
++		t.Fatalf("post-GC retained heap grew by %d bytes, above the %d-byte allowance", heapDelta, retainedHeapAllowance)
++	}
++	const goroutineAllowance = 16
++	if goroutineDelta > goroutineAllowance {
++		t.Fatalf("goroutine count grew by %d, above the %d-goroutine allowance", goroutineDelta, goroutineAllowance)
++	}
++}
++
++func TestValidationAdmissionOnAlreadyCancelledContextReleasesReservation(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++	ctx, cancel := inboundContext("alice", "192.0.2.81")
++	cancel()
++
++	reserved, err := gateWithState(ctx, manager, state)
++	if err != nil {
++		t.Fatalf("already-cancelled context admission returned an error: %v", err)
++	}
++	if !Reserved(reserved, "alice", "192.0.2.81") {
++		t.Fatal("already-cancelled context did not receive its admission marker")
++	}
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++}
++
++func TestValidationDeadlineContextReleasesReservation(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++	parent, cancelParent := inboundContext("alice", "192.0.2.82")
++	defer cancelParent()
++	ctx, cancelDeadline := context.WithTimeout(parent, 100*time.Millisecond)
++	defer cancelDeadline()
++
++	if _, err := gateWithState(ctx, manager, state); err != nil {
++		t.Fatal(err)
++	}
++	<-ctx.Done()
++	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
++		t.Fatalf("deadline context ended with %v, want DeadlineExceeded", ctx.Err())
++	}
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++}
++
++func TestValidationAncestorCancellationReleasesReservation(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager := newStatsManager(t)
++	parent, cancelParent := inboundContext("alice", "192.0.2.83")
++	child, cancelChild := context.WithCancel(parent)
++	defer cancelChild()
++
++	if _, err := gateWithState(child, manager, state); err != nil {
++		t.Fatal(err)
++	}
++	cancelParent()
++	<-child.Done()
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++}
++
++func TestValidationNestedReservationMarkerReleasesExactlyOnce(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	manager, countedManager, countedMap := newRemovalCountingManager(t)
++	root, cancelRoot := inboundContext("alice", "192.0.2.84")
++	defer cancelRoot()
++
++	reserved, err := gateWithState(root, countedManager, state)
++	if err != nil {
++		t.Fatal(err)
++	}
++	nested := context.WithValue(reserved, struct{ name string }{"validation-nested"}, true)
++	deeper := context.WithValue(nested, struct{ name string }{"validation-deeper"}, true)
++	for _, ctx := range []context.Context{nested, deeper} {
++		got, err := gateWithState(ctx, countedManager, state)
++		if err != nil {
++			t.Fatalf("nested context was rejected: %v", err)
++		}
++		if got != ctx {
++			t.Fatal("nested gate changed the already reserved context")
++		}
++		if !Reserved(got, "alice", "192.0.2.84") {
++			t.Fatal("nested context lost the inherited reservation marker")
++		}
++	}
++	assertOnlineCount(t, manager, validationOnlineMapName, 1)
++
++	cancelRoot()
++	waitRemovalCount(t, countedMap, 1)
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++	if got := countedMap.removals.Load(); got != 1 {
++		t.Fatalf("nested context path invoked RemoveIP %d times, want exactly once", got)
++	}
++}
++
++func TestValidationUnmanagedAccountsDoNotConsumeOrReleaseManagedReservation(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1, "bob": 0})
++	manager := newStatsManager(t)
++	managed, cancelManaged := inboundContext("alice", "192.0.2.85")
++	defer cancelManaged()
++	if _, err := gateWithState(managed, manager, state); err != nil {
++		t.Fatal(err)
++	}
++
++	for _, email := range []string{"unlisted", "bob"} {
++		unmanaged, cancelUnmanaged := inboundContext(email, "invalid-source-is-ignored")
++		got, err := gateWithState(unmanaged, manager, state)
++		if err != nil || got != unmanaged || Reserved(got, email, "invalid-source-is-ignored") {
++			cancelUnmanaged()
++			t.Fatalf("unlimited account %q did not follow the stock path: ctx=%v err=%v", email, got, err)
++		}
++		cancelUnmanaged()
++		assertOnlineCount(t, manager, validationOnlineMapName, 1)
++	}
++
++	blocked, cancelBlocked := inboundContext("alice", "192.0.2.86")
++	defer cancelBlocked()
++	if _, err := gateWithState(blocked, manager, state); err == nil {
++		t.Fatal("unmanaged account cancellation released the managed account's reservation")
++	}
++	cancelManaged()
++	waitOnlineCount(t, manager, validationOnlineMapName, 0)
++}
++
++type removalCountingManager struct {
++	featurestats.Manager
++	online *removalCountingOnlineMap
++}
++
++func (m *removalCountingManager) GetOrRegisterOnlineMap(string) (featurestats.OnlineMap, error) {
++	return m.online, nil
++}
++
++type removalCountingOnlineMap struct {
++	featurestats.OnlineMap
++	reserver ipReserver
++	removals atomic.Int64
++}
++
++func (m *removalCountingOnlineMap) TryAddIP(ip string, limit int) bool {
++	return m.reserver.TryAddIP(ip, limit)
++}
++
++func (m *removalCountingOnlineMap) RemoveIP(ip string) {
++	m.OnlineMap.RemoveIP(ip)
++	m.removals.Add(1)
++}
++
++func newRemovalCountingManager(t *testing.T) (*appstats.Manager, *removalCountingManager, *removalCountingOnlineMap) {
++	t.Helper()
++	manager := newStatsManager(t)
++	online, err := manager.GetOrRegisterOnlineMap(validationOnlineMapName)
++	if err != nil {
++		t.Fatal(err)
++	}
++	reserver, ok := online.(ipReserver)
++	if !ok {
++		t.Fatalf("stats online map %T does not support test reservations", online)
++	}
++	countedMap := &removalCountingOnlineMap{OnlineMap: online, reserver: reserver}
++	countedManager := &removalCountingManager{Manager: manager, online: countedMap}
++	return manager, countedManager, countedMap
++}
++
++func waitRemovalCount(t *testing.T, online *removalCountingOnlineMap, want int) {
++	t.Helper()
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		if got := online.removals.Load(); got >= int64(want) {
++			if got != int64(want) {
++				t.Fatalf("RemoveIP callback count = %d, want exactly %d", got, want)
++			}
++			return
++		}
++		runtime.Gosched()
++		time.Sleep(100 * time.Microsecond)
++	}
++	t.Fatalf("timed out waiting for %d RemoveIP callbacks; got %d", want, online.removals.Load())
++}
++
++func runAlternatingReservationBatches(t *testing.T, manager *appstats.Manager, countedManager *removalCountingManager, countedMap *removalCountingOnlineMap, state *policyState, batches, batchSize, priorRemovals int) {
++	t.Helper()
++	ips := [2]string{"192.0.2.90", "192.0.2.91"}
++	wantRemovals := priorRemovals
++	for batch := 0; batch < batches; batch++ {
++		contexts := make([]context.Context, batchSize)
++		cancels := make([]context.CancelFunc, batchSize)
++		for i := 0; i < batchSize; i++ {
++			ip := ips[(batch*batchSize+i)&1]
++			ctx, cancel := inboundContext("alice", ip)
++			contexts[i], cancels[i] = ctx, cancel
++			reserved, err := gateWithState(ctx, countedManager, state)
++			if err != nil {
++				t.Fatalf("batch %d reservation %d for %s failed: %v", batch, i, ip, err)
++			}
++			if !Reserved(reserved, "alice", ip) {
++				t.Fatalf("batch %d reservation %d for %s has no marker", batch, i, ip)
++			}
++		}
++		if got := manager.GetOnlineMap(validationOnlineMapName).Count(); got != len(ips) {
++			t.Fatalf("batch %d active unique-IP count = %d, want %d", batch, got, len(ips))
++		}
++		for _, cancel := range cancels {
++			cancel()
++		}
++		wantRemovals += batchSize
++		waitRemovalCount(t, countedMap, wantRemovals)
++		waitOnlineCount(t, manager, validationOnlineMapName, 0)
++		contexts = nil
++		cancels = nil
++	}
++}
++
++func settleValidationRuntime() {
++	for i := 0; i < 4; i++ {
++		runtime.GC()
++		runtime.Gosched()
++		time.Sleep(10 * time.Millisecond)
++	}
++}
+diff --git a/common/nativeiplimit/validation_policy_gaps_test.go b/common/nativeiplimit/validation_policy_gaps_test.go
+new file mode 100644
+--- /dev/null
++++ b/common/nativeiplimit/validation_policy_gaps_test.go
+@@ -0,0 +1,54 @@
++package nativeiplimit
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++// These are behavioral reproductions for the review report, not assertions
++// that this cold-start behavior is suitable for production activation.
++func TestValidationMissingInitialPolicyHasNoNativeLimit(t *testing.T) {
++	state := newPolicyState(map[string]struct{}{"alice": {}}, filepath.Join(t.TempDir(), "missing.json"))
++	if err := state.initialize(); err == nil {
++		t.Fatal("missing fixture file unexpectedly loaded")
++	}
++	manager := newStatsManager(t)
++	for _, ip := range []string{"192.0.2.1", "192.0.2.2"} {
++		ctx, cancel := inboundContext("alice", ip)
++		defer cancel()
++		got, err := gateWithState(ctx, manager, state)
++		if err != nil || got != ctx || Reserved(got, "alice", ip) {
++			t.Fatalf("cold-start reproduction changed: IP=%s got=%v err=%v", ip, got, err)
++		}
++	}
++	t.Log("CONFIRMED GAP: missing initial policy leaves both distinct fixture IPs unrestricted until a valid policy is loaded")
++}
++
++func TestValidationPolicyDeletionRetainsLastGoodCap(t *testing.T) {
++	state := stateWithCaps(t, map[string]int{"alice": 1})
++	if err := os.Remove(state.path); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := state.reloadIfChanged(); err == nil {
++		t.Fatal("deleted file did not produce a reload error")
++	}
++	manager := newStatsManager(t)
++	first, cancelFirst := inboundContext("alice", "192.0.2.1")
++	defer cancelFirst()
++	if _, err := gateWithState(first, manager, state); err != nil {
++		t.Fatal(err)
++	}
++	second, cancelSecond := inboundContext("alice", "192.0.2.2")
++	defer cancelSecond()
++	if _, err := gateWithState(second, manager, state); err == nil {
++		t.Fatal("deleting the file silently removed the last good cap")
++	}
++}
++
++func TestValidationCoreScopeRejectsTrailingComma(t *testing.T) {
++	if _, err := parseAllowlist("alice,"); err == nil {
++		t.Fatal("core parser behavior changed; re-evaluate panel parser mismatch")
++	}
++	t.Log("core rejects trailing comma; compare panel's TestValidationPanelScopeDropsTrailingComma")
++}
